@@ -1,0 +1,158 @@
+name: CI
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  outdated:
+    name: Outdated
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-outdated
+          version: latest
+      - run: cargo outdated
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        crate: cargo-audit
+        use-tool-cache: true
+    - uses: actions-rs/audit-check@v1.2.0
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - run: sudo apt install -y libprotobuf-dev protobuf-compiler
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+
+  #test:
+  #  name: Test
+  #  runs-on: ubuntu-latest
+  #  steps:
+  #    - run: sudo apt install -y libprotobuf-dev protobuf-compiler
+  #    - uses: actions/checkout@v2
+  #    - uses: actions-rs/toolchain@v1
+  #      with:
+  #        profile: minimal
+  #        toolchain: stable
+  #        override: true
+  #    - uses: actions-rs/cargo@v1
+  #      with:
+  #        command: test
+
+  csi-sanity:
+    name: CSI-Sanity
+    runs-on: ubuntu-latest
+    services:
+      etcd:
+        image: gcr.io/etcd-development/etcd:latest
+        # Set health checks to wait until etcd has started
+        options: >-
+          --health-cmd "/usr/local/bin/etcdctl cluster-health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 2379:2379
+          - 2380:2380
+    steps:
+      - run: sudo apt install -y libprotobuf-dev protobuf-compiler
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+      - uses: actions/checkout@v2
+        with:
+          repository: kubernetes-csi/csi-test
+          path: csi/csi-test
+        #uses: actions/setup-go@v1
+      - uses: cedrickring/golang-action@1.5.2
+        env:
+          PROJECT_PATH: "csi/csi-test/cmd/csi-sanity"
+      - run: export END_POINT=unix:///tmp/csi_sanity.sock; ./target/debug/csi --endpoint $END_POINT --nodeid localhost --workerport 50051 --runas both --etcd http://127.0.0.1:2379 & ./csi/csi-test/cmd/csi-sanity/csi-sanity -csi.endpoint=$END_POINT
+
+  fmt:
+    name: Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+#  clippy:
+#    name: Clippy
+#    runs-on: ubuntu-latest
+#    steps:
+#      - uses: actions/checkout@v2
+#      - uses: actions-rs/toolchain@v1
+#        with:
+#          profile: minimal
+#          toolchain: stable
+#          override: true
+#      - uses: actions-rs/cargo@v1
+#        with:
+#          command: clippy
+#          args: -- -D warnings
+
+#  coverage:
+#    name: Coverage
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: Checkout repository
+#        uses: actions/checkout@v2
+#
+#      - name: Install stable toolchain
+#        uses: actions-rs/toolchain@v1
+#        with:
+#          profile: minimal
+#          toolchain: stable
+#          override: true
+#
+#      - name: Run cargo-tarpaulin
+#        uses: actions-rs/tarpaulin@v0.1
+#        with:
+#          version: '0.9.0'
+#          args: '-- --test-threads 1'
+#
+#      - name: Upload to codecov.io
+#        uses: codecov/codecov-action@v1.0.2
+#        with:
+#          token: ${{secrets.CODECOV_TOKEN}}
+#
+#      - name: Archive code coverage results
+#        uses: actions/upload-artifact@v1
+#        with:
+#          name: code-coverage-report
+#          path: cobertura.xml
