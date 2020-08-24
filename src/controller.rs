@@ -6,10 +6,9 @@ use protobuf::RepeatedField;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::cast::Cast;
 use super::csi::*;
 use super::csi_grpc::Controller;
-use super::meta_data::{util, DatenLordSnapshot, DatenLordVolume, MetaData, VolumeSource};
+use super::meta_data::{util, MetaData, VolumeSource};
 
 /// for `ControllerService` implmentation
 #[derive(Clone)]
@@ -269,32 +268,7 @@ impl Controller for ControllerImpl {
         let client = self.meta_data.build_worker_client(&worker_node.node_id);
         let create_res = client.worker_create_volume(&req);
         match create_res {
-            Ok(r) => {
-                let vol_id = r.get_volume().get_volume_id();
-                let vol_res = DatenLordVolume::build_from_create_volume_req(
-                    &req,
-                    vol_id,
-                    &worker_node.node_id,
-                    &self.meta_data.get_volume_path(vol_id),
-                );
-                let volume = match vol_res {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return util::fail(
-                            &ctx,
-                            sink,
-                            RpcStatusCode::INTERNAL,
-                            format!(
-                                "failed to create volume ID={} and name={}, the errir is: {}",
-                                r.get_volume().get_volume_id(),
-                                req.get_name(),
-                                e,
-                            ),
-                        );
-                    }
-                };
-                util::success(&ctx, sink, r)
-            }
+            Ok(r) => util::success(&ctx, sink, r),
             Err(err) => {
                 let (rsc, msg) = match err {
                     Error::RpcFailure(s) => (
@@ -680,33 +654,7 @@ impl Controller for ControllerImpl {
                 let client = self.meta_data.build_worker_client(&src_vol.node_id);
                 let create_res = client.worker_create_snapshot(&req);
                 match create_res {
-                    Ok(r) => {
-                        let s = r.get_snapshot();
-                        let snap_id = s.get_snapshot_id();
-                        let creation_time = if s.has_creation_time() {
-                            match util::generate_system_time(s.get_creation_time()) {
-                                Ok(st) => st,
-                                Err(e) => {
-                                    error!("failed to generate system time from proto timestamp, the error is: {}", e);
-                                    std::time::SystemTime::now()
-                                }
-                            }
-                        } else {
-                            std::time::SystemTime::now()
-                        };
-                        let snapshot = DatenLordSnapshot::new(
-                            snap_name.to_owned(),
-                            s.get_snapshot_id().to_owned(),
-                            src_vol_id.to_owned(),
-                            src_vol.node_id.clone(),
-                            self.meta_data.get_snapshot_path(s.get_snapshot_id()),
-                            creation_time,
-                            src_vol.get_size(),
-                            true, // ready_to_use
-                        );
-
-                        util::success(&ctx, sink, r)
-                    }
+                    Ok(r) => util::success(&ctx, sink, r),
                     Err(e) => util::fail(
                         &ctx,
                         sink,

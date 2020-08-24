@@ -154,8 +154,16 @@ impl Worker for WorkerImpl {
         let vol_id = req.get_volume_id();
         let delete_res = self.meta_data.delete_volume_meta_data(vol_id);
         match delete_res {
-            Ok(_vol) => {
-                // Volume will be dropped here
+            Ok(volume) => {
+                let del_res = volume.delete_directory();
+                if let Err(e) = del_res {
+                    panic!(
+                        "failed to delete volume ID={} directory on node ID={}, the error is: {}",
+                        vol_id,
+                        self.meta_data.get_node_id(),
+                        e,
+                    );
+                }
                 debug!(
                     "successfully delete volume ID={} on node ID={}",
                     vol_id,
@@ -258,8 +266,16 @@ impl Worker for WorkerImpl {
         let snap_id = req.get_snapshot_id();
         let delete_res = self.meta_data.delete_snapshot_meta_data(snap_id);
         match delete_res {
-            Ok(_) => {
-                // Snapshot will be dropped here
+            Ok(snapshot) => {
+                let del_res = snapshot.delete_file();
+                if let Err(e) = del_res {
+                    panic!(
+                        "failed to delete snapshot ID={} file on node ID={}, the error is: {}",
+                        snap_id,
+                        self.meta_data.get_node_id(),
+                        e,
+                    );
+                }
                 debug!(
                     "successfully delete snapshot ID={} on node ID={}",
                     snap_id,

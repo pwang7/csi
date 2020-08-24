@@ -1636,7 +1636,7 @@ impl DatenLordSnapshot {
     }
 
     /// Delete snapshot file
-    fn delete_file(&self) -> anyhow::Result<()> {
+    pub fn delete_file(&self) -> anyhow::Result<()> {
         nix::unistd::unlink(&self.snap_path).context(format!(
             "failed to unlink snapshot file: {:?}",
             self.snap_path,

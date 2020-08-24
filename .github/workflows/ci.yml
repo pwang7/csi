@@ -57,47 +57,72 @@ jobs:
   #      with:
   #        command: test
 
-  csi-sanity:
-    name: CSI-Sanity
+  test:
+    name: CSI-Sanity-Test
     runs-on: ubuntu-latest
-    services:
-      etcd:
-        image: gcr.io/etcd-development/etcd:latest
-        # Set health checks to wait until etcd has started
-        options: >-
-          --health-cmd "/usr/local/bin/etcdctl cluster-health"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 2379:2379
-          - 2380:2380
+    #services:
+    #  etcd:
+    #    image: gcr.io/etcd-development/etcd:latest
+    #    # Set health checks to wait until etcd has started
+    #    options: >-
+    #      --health-cmd "/usr/local/bin/etcdctl cluster-health"
+    #      --health-interval 10s
+    #      --health-timeout 5s
+    #      --health-retries 5
+    #      --entrypoint /usr/local/bin/etcd
+    #    ports:
+    #      - 2379:2379
+    #      - 2380:2380
     steps:
-      - run: sudo apt install -y libprotobuf-dev protobuf-compiler
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - name: Install dependencies
+        run: sudo apt install -y cmake g++ libprotobuf-dev protobuf-compiler
+      - name: Prepare docker environment
+        uses: crazy-max/ghaction-docker-buildx@v3
+        with:
+          buildx-version: latest
+          qemu-version: latest
+      - name: Run etcd service
+        run: docker run --rm --net host --name etcd -d gcr.io/etcd-development/etcd:latest
+      - name: Debug Info
+        run: sudo netstat -lntp ; docker ps ; docker logs etcd
+      - name: Check out code
+        uses: actions/checkout@v2
+      - name: Prepare Rust environment
+        uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
           override: true
-      - uses: actions-rs/cargo@v1
+      - name: Cargo test
+        uses: actions-rs/cargo@v1
         with:
           command: test
-      - uses: actions-rs/cargo@v1
+      - name: Cargo build
+        uses: actions-rs/cargo@v1
         with:
           command: build
-      - uses: actions/checkout@v2
+      - name: Restart etcd service to clean up its data
+        run: docker kill etcd && docker run --rm --net host --name etcd -d gcr.io/etcd-development/etcd:latest
+      - name: Docker build csi plugin
+        run: docker build . --file ./Dockerfile --tag datenlord/csiplugin:latest
+      - name: Docker run csi plugin
+        run: docker run -d --rm -v /tmp:/tmp --net host --env RUST_LOG=debug --name datenlord_csi datenlord/csiplugin -n localhost -s unix:///tmp/csi.sock -p 50051 -r both -e http://127.0.0.1:2379 --datadir /tmp/datenlord-data-dir
+      - name: Debug Info
+        run: sudo netstat -lntp ; docker ps ; docker logs etcd ; docker logs datenlord_csi
+      - name: Check out csi-sanity code
+        uses: actions/checkout@v2
         with:
           repository: kubernetes-csi/csi-test
-          path: csi/csi-test
-        #uses: actions/setup-go@v1
-      - uses: cedrickring/golang-action@1.5.2
+          path: ./csi-test
+      - name: Build csi-sanity code
+        uses: cedrickring/golang-action@1.5.2
         env:
-          PROJECT_PATH: "csi/csi-test/cmd/csi-sanity"
-      - run: export END_POINT=unix:///tmp/csi_sanity.sock; ./target/debug/csi --endpoint $END_POINT --nodeid localhost --workerport 50051 --runas both --etcd http://127.0.0.1:2379 & ./csi/csi-test/cmd/csi-sanity/csi-sanity -csi.endpoint=$END_POINT
+          PROJECT_PATH: "./csi-test/cmd/csi-sanity"
+      - name: Run csi-sanity test
+        run: sudo ./csi-test/cmd/csi-sanity/csi-sanity -csi.endpoint=/tmp/csi.sock
 
   fmt:
-    name: Fmt
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
