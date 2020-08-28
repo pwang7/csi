@@ -1,18 +1,22 @@
 //! The utilities of meta data management
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 // use etcd_rs::*;
 use futures::prelude::*;
 use grpcio::*;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
+use nix::mount::{self, MntFlags, MsFlags};
+use nix::unistd;
 use protobuf::RepeatedField;
 use rand::Rng;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::convert::From;
+use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use walkdir::WalkDir;
 
@@ -20,6 +24,9 @@ use super::cast::Cast;
 use super::csi::*;
 use super::datenlord_worker_grpc::*;
 use util::RunAsRole;
+
+/// The path to bind mount helper command
+const BIND_MOUNTER: &str = "target/debug/bind_mounter";
 
 /// Utility functions and const variables
 pub mod util {
@@ -47,7 +54,7 @@ pub mod util {
     /// Extension with which snapshot files will be saved.
     pub const SNAPSHOT_EXT: &str = ".snap";
     /// The key to the topology hashmap
-    pub const TOPOLOGY_KEY_NODE: &str = "topology.datenlord.csi/node";
+    pub const TOPOLOGY_KEY_NODE: &str = "topology.csi.datenlord.io/node";
     /// The key of ephemeral in volume context
     pub const EPHEMERAL_KEY_CONTEXT: &str = "csi.storage.k8s.io/ephemeral";
     /// Default max volume per node, should read from input argument
@@ -60,12 +67,12 @@ pub mod util {
     /// The runtime role of CSI plugin
     #[derive(Clone, Copy, Debug)]
     pub enum RunAsRole {
-        /// Run both controller and worker service
+        /// Run both controller and node service
         Both,
         /// Run controller service only
         Controller,
-        /// Run worker service only
-        Worker,
+        /// Run node service only
+        Node,
     }
 
     /// Convert `SystemTime` to proto timestamp
@@ -82,20 +89,20 @@ pub mod util {
         Ok(ts)
     }
 
-    /// Convert proto timestamp to `SystemTime`
-    pub fn generate_system_time(
-        proto_ts: &protobuf::well_known_types::Timestamp,
-    ) -> anyhow::Result<std::time::SystemTime> {
-        let drtn = std::time::Duration::new(proto_ts.seconds.cast(), proto_ts.nanos.cast());
-        let add_res = std::time::UNIX_EPOCH.checked_add(drtn);
-        if let Some(ts) = add_res {
-            Ok(ts)
-        } else {
-            Err(anyhow::anyhow!(
-                "failed to convert proto timestamp to SystemTime"
-            ))
-        }
-    }
+    // /// Convert proto timestamp to `SystemTime`
+    // pub fn generate_system_time(
+    //     proto_ts: &protobuf::well_known_types::Timestamp,
+    // ) -> anyhow::Result<std::time::SystemTime> {
+    //     let drtn = std::time::Duration::new(proto_ts.seconds.cast(), proto_ts.nanos.cast());
+    //     let add_res = std::time::UNIX_EPOCH.checked_add(drtn);
+    //     if let Some(ts) = add_res {
+    //         Ok(ts)
+    //     } else {
+    //         Err(anyhow::anyhow!(
+    //             "failed to convert proto timestamp to SystemTime"
+    //         ))
+    //     }
+    // }
 
     /// Build list snapshot response
     pub fn add_snapshot_to_list_response(
@@ -232,6 +239,45 @@ pub mod util {
         })?;
         Ok(decoded_value)
     }
+
+    /// Un-mount target path, if fail try force un-mount again
+    pub fn umount_volume_bind_path(target_dir: &str) -> anyhow::Result<()> {
+        if unistd::geteuid().is_root() {
+            let umount_res = mount::umount(Path::new(target_dir));
+            if let Err(umount_e) = umount_res {
+                let umount_force_res = mount::umount2(Path::new(target_dir), MntFlags::MNT_FORCE);
+                if let Err(umount_force_e) = umount_force_res {
+                    return Err(anyhow::anyhow!(
+                        "failed to un-mount the target path={:?}, \
+                            the un-mount error is: {:?} and the force un-mount error is: {}",
+                        Path::new(target_dir),
+                        umount_e,
+                        umount_force_e,
+                    ));
+                }
+            }
+        } else {
+            let umount_handle = Command::new(BIND_MOUNTER)
+                .arg("-u")
+                .arg(&target_dir)
+                .output()
+                .context("bind_mounter command failed to start")?;
+            if !umount_handle.status.success() {
+                let stderr = String::from_utf8_lossy(&umount_handle.stderr);
+                debug!("bind_mounter failed to umount, the error is: {}", &stderr);
+                return Err(anyhow!(
+                    "bind_mounter failed to umount {:?}, the error is: {}",
+                    Path::new(target_dir),
+                    stderr,
+                ));
+            }
+        }
+        // csi-sanity requires plugin to remove the target mount directory
+        fs::remove_dir_all(target_dir)
+            .context(format!("failed to remove mount target path={}", target_dir))?;
+
+        Ok(())
+    }
 }
 
 /// `DatenLord` node
@@ -296,6 +342,8 @@ const SNAPSHOT_SOURCE_ID_PREFIX: &str = "snapshot_source_id";
 const VOLUME_ID_PREFIX: &str = "volume_id";
 /// The etcd key prefix to volume name
 const VOLUME_NAME_PREFIX: &str = "volume_name";
+/// The etcd key prefix to volume bind mount path
+const VOLUME_BIND_MOUNT_PATH_PREFIX: &str = "volume_bind_mount_path";
 
 impl MetaData {
     /// Create `MetaData`
@@ -320,13 +368,13 @@ impl MetaData {
             // volume_meta_data: RwLock::new(HashMap::new()),
             // snapshot_meta_data: RwLock::new(HashMap::new()),
         };
-        match run_as {
+        match md.run_as {
             RunAsRole::Both => {
                 md.register_to_etcd(CONTROLLER_PREFIX)?;
                 md.register_to_etcd(NODE_PREFIX)?;
             }
             RunAsRole::Controller => md.register_to_etcd(CONTROLLER_PREFIX)?,
-            RunAsRole::Worker => md.register_to_etcd(NODE_PREFIX)?,
+            RunAsRole::Node => md.register_to_etcd(NODE_PREFIX)?,
         }
 
         Ok(md)
@@ -372,6 +420,10 @@ impl MetaData {
         // List key-value pairs with prefix
         let node_list: Vec<DatenLordNode> =
             smol::run(async { self.get_list_from_etcd(&format!("{}/", NODE_PREFIX)).await })?;
+        debug_assert!(
+            !node_list.is_empty(),
+            "failed to retrieve node list from etcd"
+        );
         let mut rng = rand::thread_rng();
 
         // Random select a node
@@ -495,7 +547,7 @@ impl MetaData {
     }
 
     /// Delete an existing key value pair from etcd
-    async fn delete_one_value_from_etcd<T: DeserializeOwned + Clone + Debug>(
+    async fn delete_one_value_from_etcd<T: DeserializeOwned + Clone + Debug + Send + Sync>(
         &self,
         key: &str,
     ) -> anyhow::Result<T> {
@@ -508,7 +560,7 @@ impl MetaData {
     }
 
     /// Delete a key value pair or nothing from etcd
-    async fn delete_from_etcd<T: DeserializeOwned + Clone + Debug>(
+    async fn delete_from_etcd<T: DeserializeOwned + Clone + Debug + Send + Sync>(
         &self,
         key: &str,
     ) -> anyhow::Result<Option<T>> {
@@ -1058,6 +1110,25 @@ impl MetaData {
             node_vol_key,
         );
 
+        // if unistd::geteuid().is_root() {
+        let get_mount_path_res = self.get_volume_bind_mount_path(vol_id);
+        if let Ok(pre_mount_path) = get_mount_path_res {
+            let umount_res = util::umount_volume_bind_path(&pre_mount_path);
+            if let Err(e) = umount_res {
+                panic!(
+                    "failed to un-mount volume ID={} bind path={}, \
+                            the error is: {}",
+                    vol_id, pre_mount_path, e,
+                );
+            }
+            let deleted_path = self.delete_volume_bind_mount_path(vol_id)?;
+            debug_assert_eq!(
+                pre_mount_path, deleted_path,
+                "the volume bind mount path and \
+                        the deleted path not match when delete volume meta data",
+            );
+        }
+        // }
         Ok(vol_id_pre_value)
     }
 
@@ -1223,6 +1294,319 @@ impl MetaData {
         (RpcStatusCode::OK, "".to_owned())
     }
 
+    /// Delete volume bind path from etcd
+    pub fn delete_volume_bind_mount_path(&self, vol_id: &str) -> anyhow::Result<String> {
+        let volume_mount_path_key = format!(
+            "{}/{}/{}",
+            VOLUME_BIND_MOUNT_PATH_PREFIX,
+            self.get_node_id(),
+            vol_id,
+        );
+        let target_path: String = smol::run(async {
+            self.delete_one_value_from_etcd(&volume_mount_path_key)
+                .await
+        })?;
+
+        Ok(target_path)
+    }
+
+    /// Get volume bind mount path from etcd
+    pub fn get_volume_bind_mount_path(&self, vol_id: &str) -> anyhow::Result<String> {
+        let volume_mount_path_key = format!(
+            "{}/{}/{}",
+            VOLUME_BIND_MOUNT_PATH_PREFIX,
+            self.get_node_id(),
+            vol_id,
+        );
+        smol::run(async {
+            self.get_at_most_one_value_from_etcd(&volume_mount_path_key)
+                .await
+        })
+    }
+
+    /// Write volume bind mount path to etcd
+    fn save_volume_bind_mount_path(&self, vol_id: &str, target_path: &str) {
+        let volume_mount_path_key = format!(
+            "{}/{}/{}",
+            VOLUME_BIND_MOUNT_PATH_PREFIX,
+            self.get_node_id(),
+            vol_id,
+        );
+        let target_path_str = target_path.to_owned();
+        let volume_mount_path_pre_value = smol::run(async {
+            self.write_to_etcd(&volume_mount_path_key, &target_path_str)
+                .await
+        });
+        match volume_mount_path_pre_value {
+            Ok(pre_value) => {
+                if let Some(pre_mount_path) = pre_value {
+                    if pre_mount_path == target_path {
+                        warn!(
+                            "the volume has been mount to {}, \
+                                and this time mount to the same path again {}",
+                            pre_mount_path, target_path,
+                        );
+                    } else {
+                        panic!(
+                            "the volume has been mount to {}, \
+                                and this time re-mount to {}",
+                            pre_mount_path, target_path,
+                        );
+                    }
+                }
+            }
+            Err(e) => panic!(
+                "failed to write the mount path={} of volume ID={} to etcd, \
+                    the error is: {}",
+                target_path, vol_id, e,
+            ),
+        }
+    }
+
+    /// Bind mount volume directory to target path if root
+    pub fn bind_mount(
+        &self,
+        target_path: &str,
+        fs_type: &str,
+        read_only: bool,
+        vol_id: &str,
+        mount_options: &str,
+        ephemeral: bool,
+    ) -> (RpcStatusCode, String) {
+        let vol_path = self.get_volume_path(vol_id);
+        // Bind mount from target_path to vol_path if run as root
+        let target_dir = Path::new(target_path);
+        if target_dir.exists() {
+            debug!("found target bind mount directory={:?}", target_dir);
+        } else {
+            let create_res = fs::create_dir_all(target_dir);
+            if let Err(e) = create_res {
+                return (
+                    RpcStatusCode::INTERNAL,
+                    format!(
+                        "failed to create target bind mount directory={:?}, the error is: {}",
+                        target_dir, e,
+                    ),
+                );
+            }
+        };
+
+        let mut mnt_flags = MsFlags::MS_BIND;
+        if read_only {
+            mnt_flags |= MsFlags::MS_RDONLY;
+        }
+        let get_res = self.get_volume_bind_mount_path(vol_id);
+        let remount = match get_res {
+            Ok(pre_target_path) => {
+                debug_assert_eq!(
+                    target_path, &pre_target_path,
+                    "only one bind mount path allowed, \
+                        the target bind mount path in etcd \
+                        not match the one given to re-mount",
+                );
+                true
+            }
+            Err(_) => false,
+        };
+        if remount {
+            warn!(
+                "re-mount volume ID={} to target path={}",
+                vol_id, target_path,
+            );
+            mnt_flags |= MsFlags::MS_REMOUNT;
+        }
+        let mount_res = if unistd::geteuid().is_root() {
+            mount::mount::<Path, Path, OsStr, OsStr>(
+                Some(&vol_path),
+                target_dir,
+                if fs_type.is_empty() {
+                    None
+                } else {
+                    Some(OsStr::new(fs_type))
+                },
+                mnt_flags,
+                if mount_options.is_empty() {
+                    None
+                } else {
+                    Some(OsStr::new(&mount_options))
+                },
+            )
+            .context(format!(
+                "failed to direct mount {:?} to {:?}",
+                vol_path, target_dir
+            ))
+        } else {
+            let mut mount_cmd = Command::new(BIND_MOUNTER);
+            mount_cmd
+                .arg("-f")
+                .arg(&vol_path)
+                .arg("-t")
+                .arg(&target_dir);
+            if read_only {
+                mount_cmd.arg("-r");
+            }
+            if remount {
+                mount_cmd.arg("-m");
+            }
+            if !fs_type.is_empty() {
+                mount_cmd.arg("-s").arg(&fs_type);
+            }
+            if !mount_options.is_empty() {
+                mount_cmd.arg("-o").arg(&mount_options);
+            }
+            let mount_handle = match mount_cmd.output() {
+                Ok(h) => h,
+                Err(e) => {
+                    return (
+                        RpcStatusCode::INTERNAL,
+                        format!("bind_mounter command failed to start, the error is: {}", e),
+                    )
+                }
+            };
+            if mount_handle.status.success() {
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&mount_handle.stderr);
+                debug!("bind_mounter failed to mount, the error is: {}", &stderr);
+                Err(anyhow!(
+                    "bind_mounter failed to mount {:?} to {:?}, the error is: {}",
+                    vol_path,
+                    target_dir,
+                    stderr,
+                ))
+            }
+        };
+        if let Err(bind_err) = mount_res {
+            if ephemeral {
+                match self.delete_volume_meta_data(vol_id) {
+                    Ok(_) => debug!(
+                        "successfully deleted ephemeral volume ID={}, when bind mount failed",
+                        vol_id
+                    ),
+                    Err(e) => error!(
+                        "failed to delete ephemeral volume ID={}, \
+                            when bind mount failed, the error is: {}",
+                        vol_id, e,
+                    ),
+                }
+            }
+            return (
+                RpcStatusCode::INTERNAL,
+                format!(
+                    "failed to bind mount from {} to {:?}, the bind error is: {}",
+                    target_path, vol_path, bind_err,
+                ),
+            );
+        } else {
+            info!(
+                "successfully bind mounted volume path={:?} to target path={:?}",
+                vol_path, target_dir
+            );
+
+            self.save_volume_bind_mount_path(vol_id, target_path);
+        }
+
+        (RpcStatusCode::OK, "".to_owned())
+    }
+
+    // /// or create target path as symbolic link to volume directory if non-root
+    // pub fn symbolic_link(
+    //     &self,
+    //     target_path: &str,
+    //     vol_id: &str,
+    //     ephemeral: bool,
+    // ) -> (RpcStatusCode, String) {
+    //     let vol_path = self.get_volume_path(vol_id);
+    //     // Build symlink from target_path to vol_path if run as non-root
+    //     let sym_link = std::path::Path::new(target_path);
+    //     if sym_link.exists() {
+    //         let read_link_res = fs::read_link(&sym_link);
+    //         match read_link_res {
+    //             Err(e) => {
+    //                 panic!(
+    //                     "failed to read the volume target path={} as a symlink, the error is: {}",
+    //                     target_path, e,
+    //                 );
+    //             }
+    //             Ok(old_link_path) => {
+    //                 let str_uuid_res = if old_link_path.is_dir() {
+    //                     // Find base directory name (volume ID part) of a volume directory path
+    //                     let last_res = old_link_path.file_name();
+    //                     match last_res {
+    //                         None => panic!(
+    //                             "failed to get the volume ID from the existing volume path={:?}",
+    //                             old_link_path,
+    //                         ),
+    //                         Some(base_dir_name) => {
+    //                             String::from_utf8(base_dir_name.as_bytes().to_owned())
+    //                         }
+    //                     }
+    //                 } else {
+    //                     panic!(
+    //                         "volume path should be a directory, but {} is not directory",
+    //                         old_link_path.display(),
+    //                     );
+    //                 };
+    //                 match str_uuid_res {
+    //                     Ok(uuid_str) => {
+    //                         let old_vol_id = match uuid::Uuid::parse_str(&uuid_str) {
+    //                             Ok(old_uuid) => old_uuid.to_string(),
+    //                             Err(e) => panic!(
+    //                                 "failed to convert string={} to uuid, the error is: {}",
+    //                                 uuid_str, e,
+    //                             ),
+    //                         };
+    //                         // For idempotency, in case call this function repeatedly
+    //                         if old_vol_id != vol_id {
+    //                             // TODO: should delete old volume here?
+    //                             match self.delete_volume_meta_data(&old_vol_id) {
+    //                                 Ok(_) => debug!("successfully deleted old volume ID={}", old_vol_id),
+    //                                 Err(e) => error!("failed to delete old volume ID={}, the error is: {}", old_vol_id, e,),
+    //                             }
+    //                         }
+    //                     }
+    //                     Err(e) => panic!(
+    //                         "failed to parse the volume ID from invalid volume path={:?}, the error is: {}",
+    //                         old_link_path, e,
+    //                     ),
+    //                 }
+    //             }
+    //         }
+    //         let remove_res = fs::remove_file(&sym_link);
+    //         debug_assert!(
+    //             remove_res.is_ok(),
+    //             "failed to remove existing target path={:?}",
+    //             sym_link
+    //         );
+    //     }
+
+    //     let link_res = unistd::symlinkat(&vol_path, None, sym_link);
+    //     if let Err(e) = link_res {
+    //         if ephemeral {
+    //             match self.delete_volume_meta_data(vol_id) {
+    //                 Ok(_) => debug!(
+    //                     "successfully deleted ephemeral volume ID={}, when make symlink failed",
+    //                     vol_id
+    //                 ),
+    //                 Err(e) => error!(
+    //                     "failed to delete ephemeral volume ID={}, \
+    //                                 when make symlink failed, the error is: {}",
+    //                     vol_id, e,
+    //                 ),
+    //             }
+    //         }
+    //         return (
+    //             RpcStatusCode::INTERNAL,
+    //             format!(
+    //                 "failed to create symlink from {} to {:?}, the error is: {}",
+    //                 target_path, vol_path, e,
+    //             ),
+    //         );
+    //     }
+
+    //     (RpcStatusCode::OK, "".to_owned())
+    // }
+
     /// Build snapshot from source volume
     pub fn build_snapshot_from_volume(
         &self,
@@ -1304,16 +1688,16 @@ impl MetaData {
                 }
 
                 let now = std::time::SystemTime::now();
-                let snapshot = DatenLordSnapshot {
-                    snap_name: snap_name.to_owned(),
-                    snap_id: snap_id.to_string(),
-                    vol_id: src_vol_id.to_owned(),
-                    node_id: self.get_node_id().to_owned(),
+                let snapshot = DatenLordSnapshot::new(
+                    snap_name.to_owned(),
+                    snap_id.to_string(),
+                    src_vol_id.to_owned(),
+                    self.get_node_id().to_owned(),
                     snap_path,
-                    creation_time: now,
-                    size_bytes: src_vol.get_size(),
-                    ready_to_use: true,
-                };
+                    now,
+                    src_vol.get_size(),
+                    true, // ready_to_use
+                );
 
                 Ok(snapshot)
             }

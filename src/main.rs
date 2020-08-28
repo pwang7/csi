@@ -181,8 +181,7 @@ fn build_grpc_servers(
     // debug_assert!(!overflow2, "computing memory size overflowed");
     // let quota = ResourceQuota::new(Some("WorkerQuota")).resize_memory(mem_size2);
     // let ch_builder = ChannelBuilder::new(Arc::<Environment>::clone(&env)).set_resource_quota(quota);
-    let worker_service =
-        datenlord_worker_grpc::create_worker(WorkerImpl::new(Arc::<MetaData>::clone(&meta_data)));
+    let worker_service = datenlord_worker_grpc::create_worker(WorkerImpl::new(meta_data));
     let worker_server = grpcio::ServerBuilder::new(Arc::new(Environment::new(1)))
         .register_service(worker_service)
         .bind(worker_bind_address, worker_bind_port)
@@ -338,9 +337,9 @@ fn parse_args() -> ArgMatches<'static> {
                 .value_name("ROLE NAME")
                 .takes_value(true)
                 .help(
-                    "Set the runtime role, \
-                        set as either controller or worker, \
-                        default as worker",
+                    "Set the runtime service, \
+                        set as controller, node or both, \
+                        default as node",
                 ),
         )
         .arg(
@@ -399,13 +398,13 @@ fn main() -> anyhow::Result<()> {
         Some(r) => match r {
             "both" => RunAsRole::Both,
             "controller" => RunAsRole::Controller,
-            "worker" => RunAsRole::Worker,
+            "node" => RunAsRole::Node,
             _ => panic!(
                 "invalid {} argument {}, must be one of both, controller, worker",
                 RUN_AS_ARG_NAME, r,
             ),
         },
-        None => RunAsRole::Worker,
+        None => RunAsRole::Node,
     };
     let etcd_address_vec = match matches.value_of(ETCD_ADDRESS_ARG_NAME) {
         Some(a) => a.split(',').map(std::borrow::ToOwned::to_owned).collect(),
@@ -456,7 +455,6 @@ mod test {
     use csi::*;
     use csi_grpc::{ControllerClient, IdentityClient, NodeClient};
 
-    use grpcio::*;
     use protobuf::RepeatedField;
     use std::fs::{self, File};
     use std::io::prelude::*;
@@ -466,6 +464,8 @@ mod test {
 
     const NODE_PUBLISH_VOLUME_TARGET_PATH: &str = "/tmp/target_volume_path";
     const NODE_PUBLISH_VOLUME_ID: &str = "46ebd0ee-0e6d-43c9-b90d-ccc35a913f3e";
+    const ETCD_ENV_VAR_KEY: &str = "ETCD_END_POINT";
+    const DEFAULT_ETCD_ENDPOINT_FOR_TEST: &str = "http://127.0.0.1:2379";
     static GRPC_SERVER: Once = Once::new();
 
     #[test]
@@ -480,7 +480,7 @@ mod test {
     }
 
     fn test_meta_data() -> anyhow::Result<()> {
-        let etcd_address_vec = vec!["http://localhost:2379".to_owned()];
+        let etcd_address_vec = get_etcd_address_vec();
         let etcd_client = build_etcd_client(etcd_address_vec)?;
         clear_test_data(&etcd_client)?;
 
@@ -582,6 +582,16 @@ mod test {
         Path::new(util::DATA_DIR).join(vol_id)
     }
 
+    fn get_etcd_address_vec() -> Vec<String> {
+        match std::env::var(ETCD_ENV_VAR_KEY) {
+            Ok(val) => {
+                println!("{}={}", ETCD_ENV_VAR_KEY, val);
+                vec![val]
+            }
+            Err(_) => vec![DEFAULT_ETCD_ENDPOINT_FOR_TEST.to_owned()],
+        }
+    }
+
     fn clear_test_data(etcd_client: &etcd_rs::Client) -> anyhow::Result<()> {
         let dir_path = Path::new(util::DATA_DIR);
         if dir_path.exists() {
@@ -589,7 +599,12 @@ mod test {
         }
         let node_volume_publish_path = Path::new(NODE_PUBLISH_VOLUME_TARGET_PATH);
         if node_volume_publish_path.exists() {
-            fs::remove_file(NODE_PUBLISH_VOLUME_TARGET_PATH)?;
+            let umount_res = util::umount_volume_bind_path(NODE_PUBLISH_VOLUME_TARGET_PATH);
+            debug!(
+                "un-mount {} result: {:?}",
+                NODE_PUBLISH_VOLUME_TARGET_PATH, umount_res
+            );
+            fs::remove_dir_all(NODE_PUBLISH_VOLUME_TARGET_PATH)?;
         }
 
         let req = etcd_rs::DeleteRequest::new(etcd_rs::KeyRange::all());
@@ -609,7 +624,7 @@ mod test {
         let driver_name = util::CSI_PLUGIN_NAME.to_owned();
         let data_dir = util::DATA_DIR.to_owned();
         let run_as = RunAsRole::Both;
-        let etcd_address_vec = vec!["http://localhost:2379".to_owned()];
+        let etcd_address_vec = get_etcd_address_vec();
         let etcd_client = build_etcd_client(etcd_address_vec)?;
 
         let async_server = false;
@@ -1376,10 +1391,7 @@ mod test {
             .collect::<Vec<_>>();
         assert_eq!(
             cap_vec,
-            vec![
-                NodeServiceCapability_RPC_Type::STAGE_UNSTAGE_VOLUME,
-                NodeServiceCapability_RPC_Type::EXPAND_VOLUME,
-            ],
+            vec![NodeServiceCapability_RPC_Type::EXPAND_VOLUME,],
             "node_get_capabilities returns unexpected capabilities",
         );
 

@@ -2,7 +2,7 @@ FROM ubuntu
 LABEL maintainers="DatenLord Authors"
 LABEL description="DatenLord CSI Driver"
 # TODO: use release version
-ARG binary=target/debug/csi
+ARG binary=csi
 
 COPY ${binary} /usr/local/bin/csiplugin
 ENTRYPOINT ["/usr/local/bin/csiplugin"]

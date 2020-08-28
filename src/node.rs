@@ -4,8 +4,6 @@ use grpcio::*;
 use log::{debug, error, info};
 use nix::sys::stat::{self, SFlag};
 use protobuf::RepeatedField;
-use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use super::csi::*;
@@ -24,10 +22,7 @@ pub struct NodeImpl {
 impl NodeImpl {
     /// Create `NodeImpl`
     pub fn new(meta_data: Arc<MetaData>) -> Self {
-        let cap_vec = vec![
-            NodeServiceCapability_RPC_Type::STAGE_UNSTAGE_VOLUME,
-            NodeServiceCapability_RPC_Type::EXPAND_VOLUME,
-        ];
+        let cap_vec = vec![NodeServiceCapability_RPC_Type::EXPAND_VOLUME];
         let caps = cap_vec
             .into_iter()
             .map(|rpc_type| {
@@ -37,6 +32,15 @@ impl NodeImpl {
             })
             .collect();
         Self { caps, meta_data }
+    }
+
+    /// Validate request with controller capabilities
+    fn validate_request_capability(&self, rpc_type: NodeServiceCapability_RPC_Type) -> bool {
+        rpc_type == NodeServiceCapability_RPC_Type::UNKNOWN
+            || self
+                .caps
+                .iter()
+                .any(|cap| cap.get_rpc().get_field_type() == rpc_type)
     }
 }
 
@@ -48,6 +52,16 @@ impl Node for NodeImpl {
         sink: UnarySink<NodeStageVolumeResponse>,
     ) {
         debug!("node_stage_volume request: {:?}", req);
+
+        let rpc_type = NodeServiceCapability_RPC_Type::STAGE_UNSTAGE_VOLUME;
+        if !self.validate_request_capability(rpc_type) {
+            return util::fail(
+                &ctx,
+                sink,
+                RpcStatusCode::INVALID_ARGUMENT,
+                format!("unsupported capability {:?}", rpc_type),
+            );
+        }
 
         // Check arguments
         let vol_id = req.get_volume_id();
@@ -87,6 +101,16 @@ impl Node for NodeImpl {
         sink: UnarySink<NodeUnstageVolumeResponse>,
     ) {
         debug!("node_unstage_volume request: {:?}", req);
+
+        let rpc_type = NodeServiceCapability_RPC_Type::STAGE_UNSTAGE_VOLUME;
+        if !self.validate_request_capability(rpc_type) {
+            return util::fail(
+                &ctx,
+                sink,
+                RpcStatusCode::INVALID_ARGUMENT,
+                format!("unsupported capability {:?}", rpc_type),
+            );
+        }
 
         // Check arguments
         if req.get_volume_id().is_empty() {
@@ -205,18 +229,6 @@ impl Node for NodeImpl {
             );
         }
 
-        let volume = match self.meta_data.get_volume_by_id(vol_id) {
-            Ok(v) => v,
-            Err(e) => {
-                return util::fail(
-                    &ctx,
-                    sink,
-                    RpcStatusCode::NOT_FOUND,
-                    format!("failed to find volume ID={}, the error is: {}", vol_id, e,),
-                );
-            }
-        };
-
         match &req.get_volume_capability().access_type {
             None => {
                 return util::fail(
@@ -231,101 +243,43 @@ impl Node for NodeImpl {
                 {
                     let fs_type = volume_mount_option.get_fs_type();
                     let mount_flags = volume_mount_option.get_mount_flags();
-
+                    let mount_options = mount_flags.join(",");
                     info!(
                         "target={}\nfstype={}\ndevice={}\nreadonly={}\n\
-                            volume ID={}\nattributes={:?}\nmountflags={:?}\n",
+                            volume ID={}\nattributes={:?}\nmountflags={}\n",
                         target_path,
                         fs_type,
                         device_id,
                         read_only,
                         vol_id,
                         volume_context,
-                        mount_flags,
+                        mount_options,
                     );
-
-                    let sym_link = std::path::Path::new(target_path);
-                    if sym_link.exists() {
-                        let read_link_res = fs::read_link(&sym_link);
-                        match read_link_res {
-                            Err(e) => {
-                                panic!(
-                                    "failed to read the volume target path={} as a symlink, the error is: {}",
-                                    target_path, e,
-                                );
-                            }
-                            Ok(old_link_path) => {
-                                let str_uuid_res = if old_link_path.is_dir() {
-                                    let last_res = old_link_path.iter().nth_back(0); // Find base directory name
-                                    match last_res {
-                                        None => panic!(
-                                            "failed to get the volume ID from the existing volume path={:?}",
-                                            old_link_path,
-                                        ),
-                                        Some(base_dir_name) => String::from_utf8(base_dir_name.as_bytes().to_owned()),
-                                    }
-                                } else {
-                                    panic!(
-                                        "volume path should be a directory, but {} is not directory",
-                                        old_link_path.display(),
-                                    );
-                                };
-                                match str_uuid_res {
-                                    Ok(uuid_str) => {
-                                        let old_vol_id = match uuid::Uuid::parse_str(&uuid_str) {
-                                            Ok(old_uuid) => old_uuid.to_string(),
-                                            Err(e) => panic!(
-                                                "failed to convert string={} to uuid, the error is: {}",
-                                                uuid_str, e,
-                                            ),
-                                        };
-                                        // For idempotency, in case call this function repeatedly
-                                        if old_vol_id != vol_id {
-                                            // TODO: not to delete old volume
-                                            match self.meta_data.delete_volume_meta_data(&old_vol_id) {
-                                                Ok(_) => debug!("successfully deleted old volume ID={}", old_vol_id),
-                                                Err(e) => error!("failed to delete old volume ID={}, the error is: {}", old_vol_id, e,),
-                                            }
-                                        }
-                                    }
-                                    Err(e) => panic!(
-                                        "failed to parse the volume ID from invalid volume path={:?}, the error is: {}",
-                                        old_link_path, e,
-                                    ),
-                                }
-                            }
-                        }
-                        let remove_res = fs::remove_file(&sym_link);
-                        debug_assert!(
-                            remove_res.is_ok(),
-                            "failed to remove existing target path={:?}",
-                            sym_link
-                        );
-                    }
-
-                    let vol_path = self.meta_data.get_volume_path(vol_id);
-                    // Build symlink from target_path to vol_path
-                    let link_res = nix::unistd::symlinkat(&vol_path, None, sym_link);
-                    if let Err(e) = link_res {
-                        if volume.ephemeral {
-                            match self.meta_data.delete_volume_meta_data(vol_id) {
-                                Ok(_) => debug!("successfully deleted ephemeral volume ID={}, when make symlink failed", vol_id),
-                                Err(e) => error!(
-                                    "failed to delete ephemeral volume ID={}, \
-                                        when make symlink failed, the error is: {}",
-                                    vol_id, e,
-                                ),
-                            }
-                        }
-                        return util::fail(
-                            &ctx,
-                            sink,
-                            RpcStatusCode::INTERNAL,
-                            format!(
-                                "failed to create symlink from {} to {:?}, the error is: {}",
-                                target_path, vol_path, e,
-                            ),
-                        );
+                    // Bind mount from target_path to vol_path
+                    let (rpc_status_code, err_msg) = self.meta_data.bind_mount(
+                        target_path,
+                        fs_type,
+                        read_only,
+                        vol_id,
+                        &mount_options,
+                        ephemeral,
+                    );
+                    // let (rpc_status_code, err_msg) = if unistd::geteuid().is_root() {
+                    //     // Bind mount from target_path to vol_path if run as root
+                    //     self.meta_data.bind_mount(
+                    //         target_path,
+                    //         fs_type,
+                    //         read_only,
+                    //         vol_id,
+                    //         &mount_options,
+                    //         ephemeral,
+                    //     )
+                    // } else {
+                    //     // Build symlink from target_path to vol_path if run as non-root
+                    //     self.meta_data.symbolic_link(target_path, vol_id, ephemeral)
+                    // };
+                    if RpcStatusCode::OK != rpc_status_code {
+                        return util::fail(&ctx, sink, rpc_status_code, err_msg);
                     }
                 } else {
                     // VolumeCapability_oneof_access_type::block(..) not supported
@@ -383,15 +337,57 @@ impl Node for NodeImpl {
             }
         };
 
-        // Delete target_path
         // Does not return error for non-existent path, repeated calls OK for idempotency
-        let remove_res = fs::remove_file(&target_path);
-        if let Err(e) = remove_res {
-            info!(
-                "failed to remove the target path={}, the error is: {}",
-                target_path, e,
+        // if unistd::geteuid().is_root() {
+        let get_mount_path_res = self.meta_data.get_volume_bind_mount_path(vol_id);
+        let tolerant_umount_error = if let Ok(pre_mount_path) = get_mount_path_res {
+            debug_assert_eq!(
+                target_path, &pre_mount_path,
+                "the target path to un-mount  \
+                        not match the one stored in etcd",
+            );
+            let delete_res = self.meta_data.delete_volume_bind_mount_path(vol_id);
+            if let Err(e) = delete_res {
+                panic!(
+                    "failed to delete voluem ID={} bind path={} from etcd, the error is: {}",
+                    vol_id, pre_mount_path, e,
+                );
+            }
+            false
+        } else {
+            true
+        };
+        if let Err(e) = util::umount_volume_bind_path(target_path) {
+            if tolerant_umount_error {
+                // Try to un-mount the path not stored in etcd, if error just log it
+                error!(
+                    "failed to un-mount volume ID={} bind path={}, the error is: {}",
+                    vol_id, target_path, e,
+                );
+            } else {
+                // Un-mount the path stored in etcd, if error then panic
+                panic!(
+                    "failed to un-mount volume ID={} bind path={}, the error is: {}",
+                    vol_id, target_path, e,
+                );
+            }
+        } else {
+            debug!(
+                "successfully un-mount voluem ID={} bind path={}",
+                vol_id, target_path,
             );
         }
+        // } else {
+        //     // Delete target_path as a symbolic link
+        //     let remove_res = fs::remove_file(&target_path);
+        //     if let Err(e) = remove_res {
+        //         error!(
+        //             "failed to remove the target path={}, the error is: {}",
+        //             target_path, e,
+        //         );
+        //     }
+        // }
+
         info!(
             "volume ID={} and name={} with target path={} has been unpublished.",
             vol_id, volume.vol_name, target_path

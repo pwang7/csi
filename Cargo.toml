@@ -34,3 +34,7 @@ walkdir = "2.3.1"
 
 [build-dependencies]
 protoc-grpcio = "2.0.0"
+
+[[bin]]
+path = "src/bin/bind_mounter.rs"
+name = "bind_mounter"
