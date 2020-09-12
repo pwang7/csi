@@ -198,47 +198,6 @@ spec:
       serviceAccount: csi-nodeplugin-sa
       priorityClassName: csi-datenlord-critical
       containers:
-        - name: csi-node-driver-registrar
-          securityContext:
-            privileged: true
-          image: quay.io/k8scsi/csi-node-driver-registrar:v1.3.0
-          imagePullPolicy: "IfNotPresent"
-          args:
-            - "--v=5"
-            - "--csi-address=$(ADDRESS)"
-            - "--kubelet-registration-path=/var/lib/kubelet/plugins/csi.datenlord.io/node.sock" # this path is outside container for microk8s
-          lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "rm -rf /registration/csi.datenlord.io /registration/csi.datenlord.io-reg.sock"]
-          env:
-            - name: ADDRESS
-              value: /plugin/node.sock
-            - name: KUBE_NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /plugin
-            - name: registration-dir
-              mountPath: /registration
-        #- name: liveness-probe
-        #  securityContext:
-        #    privileged: true
-        #  image: quay.io/k8scsi/livenessprobe:v2.0.0
-        #  imagePullPolicy: "IfNotPresent"
-        #  args:
-        #    - "--v=5"
-        #    - "--csi-address=$(ADDRESS)"
-        #    - "--probe-timeout=60s"
-        #    - "--health-port=9898"
-        #  env:
-        #    - name: ADDRESS
-        #      value: /plugin/node.sock
-        #  volumeMounts:
-        #    - name: socket-dir
-        #      mountPath: /plugin
         - name: datenlord-node-plugin
           securityContext:
             privileged: true
@@ -300,6 +259,47 @@ spec:
               mountPath: /tmp
             - name: dev-dir
               mountPath: /dev
+        - name: csi-node-driver-registrar
+          securityContext:
+            privileged: true
+          image: quay.io/k8scsi/csi-node-driver-registrar:v1.3.0
+          imagePullPolicy: "IfNotPresent"
+          args:
+            - "--v=5"
+            - "--csi-address=$(ADDRESS)"
+            - "--kubelet-registration-path=/var/lib/kubelet/plugins/csi.datenlord.io/node.sock" # this path is outside container for microk8s
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "rm -rf /registration/csi.datenlord.io /registration/csi.datenlord.io-reg.sock"]
+          env:
+            - name: ADDRESS
+              value: /plugin/node.sock
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /plugin
+            - name: registration-dir
+              mountPath: /registration
+        #- name: liveness-probe
+        #  securityContext:
+        #    privileged: true
+        #  image: quay.io/k8scsi/livenessprobe:v2.0.0
+        #  imagePullPolicy: "IfNotPresent"
+        #  args:
+        #    - "--v=5"
+        #    - "--csi-address=$(ADDRESS)"
+        #    - "--probe-timeout=60s"
+        #    - "--health-port=9898"
+        #  env:
+        #    - name: ADDRESS
+        #      value: /plugin/node.sock
+        #  volumeMounts:
+        #    - name: socket-dir
+        #      mountPath: /plugin
       volumes:
         - name: socket-dir
           hostPath:
@@ -347,6 +347,76 @@ spec:
       serviceAccount: csi-controller-sa
       priorityClassName: csi-datenlord-critical
       containers:
+        - name: datenlord-controller-plugin
+          securityContext:
+            # This is necessary only for systems with SELinux, where
+            # non-privileged sidecar containers cannot access unix domain socket
+            # created by privileged CSI driver container.
+            privileged: true
+          image: datenlord/csiplugin:latest
+          imagePullPolicy: "Always" # TODO: Change to IfNotPresent when release
+          args :
+            - "--endpoint=$(CSI_CONTROLLER_ENDPOINT)"
+            - "--drivername=csi.datenlord.io"
+            - "--nodeid=$(NODE_ID)"
+            - "--workerport=50051"
+            - "--runas=controller"
+            - "--datadir=$(DATA_DIR)"
+            - "--etcd=http://127.0.0.1:62379"
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CSI_CONTROLLER_ENDPOINT
+              value: unix:///plugin/controller.sock
+            - name: RUST_LOG
+              value: csi=debug
+            - name: RUST_BACKTRACE
+              value: full
+            - name: DATA_DIR
+              value: /tmp/datenlord-data
+          #ports:
+          #  - containerPort: 50051
+          #    hostPort: 50051
+          #  - containerPort: 9898
+          #    name: healthz
+          #    protocol: TCP
+          #livenessProbe:
+          #  failureThreshold: 5
+          #  httpGet:
+          #    path: /healthz
+          #    port: healthz
+          #  initialDelaySeconds: 10
+          #  timeoutSeconds: 3
+          #  periodSeconds: 2
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /plugin
+        - name: etcd
+          image: gcr.io/etcd-development/etcd:latest
+          imagePullPolicy: "IfNotPresent"
+          command:
+            - "/usr/local/bin/etcd"
+          args:
+            - "--name=$(NODE_ID)"
+            - "--initial-advertise-peer-urls=http://$(NODE_ID):62380"
+            - "--listen-peer-urls=http://0.0.0.0:62380"
+            - "--advertise-client-urls=http://$(NODE_ID):62379"
+            - "--listen-client-urls=http://0.0.0.0:62379"
+            - "--initial-cluster=$(NODE_ID)=http://$(NODE_ID):62380"
+            - "--listen-metrics-urls=http://0.0.0.0:62381"
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 62381
+            initialDelaySeconds: 10
+            periodSeconds: 5
         - name: csi-attacher
           securityContext:
             # This is necessary only for systems with SELinux, where
@@ -430,76 +500,6 @@ spec:
             - name: ADDRESS
               value: /plugin/controller.sock
           imagePullPolicy: "IfNotPresent"
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /plugin
-        - name: etcd
-          image: gcr.io/etcd-development/etcd:latest
-          imagePullPolicy: "IfNotPresent"
-          command:
-            - "/usr/local/bin/etcd"
-          args:
-            - "--name=$(NODE_ID)"
-            - "--initial-advertise-peer-urls=http://$(NODE_ID):62380"
-            - "--listen-peer-urls=http://0.0.0.0:62380"
-            - "--advertise-client-urls=http://$(NODE_ID):62379"
-            - "--listen-client-urls=http://0.0.0.0:62379"
-            - "--initial-cluster=$(NODE_ID)=http://$(NODE_ID):62380"
-            - "--listen-metrics-urls=http://0.0.0.0:62381"
-          env:
-            - name: NODE_ID
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 62381
-            initialDelaySeconds: 10
-            periodSeconds: 5
-        - name: datenlord-controller-plugin
-          securityContext:
-            # This is necessary only for systems with SELinux, where
-            # non-privileged sidecar containers cannot access unix domain socket
-            # created by privileged CSI driver container.
-            privileged: true
-          image: datenlord/csiplugin:latest
-          imagePullPolicy: "Always" # TODO: Change to IfNotPresent when release
-          args :
-            - "--endpoint=$(CSI_CONTROLLER_ENDPOINT)"
-            - "--drivername=csi.datenlord.io"
-            - "--nodeid=$(NODE_ID)"
-            - "--workerport=50051"
-            - "--runas=controller"
-            - "--datadir=$(DATA_DIR)"
-            - "--etcd=http://127.0.0.1:62379"
-          env:
-            - name: NODE_ID
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: CSI_CONTROLLER_ENDPOINT
-              value: unix:///plugin/controller.sock
-            - name: RUST_LOG
-              value: csi=debug
-            - name: RUST_BACKTRACE
-              value: full
-            - name: DATA_DIR
-              value: /tmp/datenlord-data
-          #ports:
-          #  - containerPort: 50051
-          #    hostPort: 50051
-          #  - containerPort: 9898
-          #    name: healthz
-          #    protocol: TCP
-          #livenessProbe:
-          #  failureThreshold: 5
-          #  httpGet:
-          #    path: /healthz
-          #    port: healthz
-          #  initialDelaySeconds: 10
-          #  timeoutSeconds: 3
-          #  periodSeconds: 2
           volumeMounts:
             - name: socket-dir
               mountPath: /plugin

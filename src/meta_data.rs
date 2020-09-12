@@ -3,14 +3,15 @@
 use anyhow::{anyhow, Context};
 // use etcd_rs::*;
 use futures::prelude::*;
-use grpcio::*;
-use log::{debug, error, info, warn};
+use grpcio::{ChannelBuilder, Environment, RpcContext, RpcStatus, RpcStatusCode, UnarySink};
+use log::{debug, error, info};
 use nix::mount::{self, MntFlags, MsFlags};
 use nix::unistd;
 use protobuf::RepeatedField;
 use rand::Rng;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::convert::From;
 use std::ffi::OsStr;
 use std::fmt::Debug;
@@ -18,11 +19,11 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use utilities::Cast;
 use walkdir::WalkDir;
 
-use super::cast::Cast;
 use super::csi::*;
-use super::datenlord_worker_grpc::*;
+use super::datenlord_worker_grpc::WorkerClient;
 use util::RunAsRole;
 
 /// The path to bind mount helper command
@@ -30,7 +31,6 @@ const BIND_MOUNTER: &str = "target/debug/bind_mounter";
 
 /// Utility functions and const variables
 pub mod util {
-    use super::super::cast::Cast;
     use super::*;
 
     /// The CSI plugin name
@@ -344,6 +344,17 @@ const VOLUME_ID_PREFIX: &str = "volume_id";
 const VOLUME_NAME_PREFIX: &str = "volume_name";
 /// The etcd key prefix to volume bind mount path
 const VOLUME_BIND_MOUNT_PATH_PREFIX: &str = "volume_bind_mount_path";
+/// The separator used to split multiple volume bind mount paths
+const VOLUME_BIND_MOUNT_PATH_SEPARATOR: &str = "\n";
+/// The bind mount mode of a volume
+enum BindMountMode {
+    /// Volume bind mount to a pod once
+    Single,
+    /// Volume bind mount to multiple pods
+    Multiple,
+    /// Volume remount to a pod
+    Remount,
+}
 
 impl MetaData {
     /// Create `MetaData`
@@ -873,11 +884,6 @@ impl MetaData {
     ) -> anyhow::Result<()> {
         info!("adding the meta data of snapshot ID={}", snap_id);
 
-        // self.snapshot_meta_data
-        //     .write()
-        //     .unwrap()
-        //     .insert(snap_id, Arc::new(snapshot))
-
         // TODO: use etcd transancation?
         let snap_id_key = format!("{}/{}", SNAPSHOT_ID_PREFIX, snap_id);
         let snap_id_pre_value =
@@ -1110,25 +1116,25 @@ impl MetaData {
             node_vol_key,
         );
 
-        // if unistd::geteuid().is_root() {
         let get_mount_path_res = self.get_volume_bind_mount_path(vol_id);
-        if let Ok(pre_mount_path) = get_mount_path_res {
-            let umount_res = util::umount_volume_bind_path(&pre_mount_path);
-            if let Err(e) = umount_res {
-                panic!(
-                    "failed to un-mount volume ID={} bind path={}, \
+        if let Ok(pre_mount_path_vec) = get_mount_path_res {
+            pre_mount_path_vec.iter().for_each(|pre_mount_path| {
+                let umount_res = util::umount_volume_bind_path(pre_mount_path);
+                if let Err(e) = umount_res {
+                    panic!(
+                        "failed to un-mount volume ID={} bind path={}, \
                             the error is: {}",
-                    vol_id, pre_mount_path, e,
-                );
-            }
-            let deleted_path = self.delete_volume_bind_mount_path(vol_id)?;
+                        vol_id, pre_mount_path, e,
+                    );
+                }
+            });
+            let deleted_path_vec = self.delete_volume_all_bind_mount_path(vol_id)?;
             debug_assert_eq!(
-                pre_mount_path, deleted_path,
-                "the volume bind mount path and \
-                        the deleted path not match when delete volume meta data",
+                pre_mount_path_vec, deleted_path_vec,
+                "the volume bind mount paths and \
+                    the deleted paths not match when delete volume meta data",
             );
         }
-        // }
         Ok(vol_id_pre_value)
     }
 
@@ -1294,38 +1300,99 @@ impl MetaData {
         (RpcStatusCode::OK, "".to_owned())
     }
 
-    /// Delete volume bind path from etcd
-    pub fn delete_volume_bind_mount_path(&self, vol_id: &str) -> anyhow::Result<String> {
+    /// Delete one bind path of a volume from etcd
+    /// return all bind paths before deletion
+    pub fn delete_volume_one_bind_mount_path(
+        &self,
+        vol_id: &str,
+        mount_path: &str,
+    ) -> anyhow::Result<HashSet<String>> {
+        let mut mount_path_set = self.get_volume_bind_mount_path(vol_id).context(format!(
+            "failed to get the bind mount paths of volume ID={}",
+            vol_id,
+        ))?;
+        if mount_path_set.contains(mount_path) {
+            let volume_mount_path_key = format!(
+                "{}/{}/{}",
+                VOLUME_BIND_MOUNT_PATH_PREFIX,
+                self.get_node_id(),
+                vol_id,
+            );
+            mount_path_set.remove(mount_path);
+            if mount_path_set.is_empty() {
+                // Delete the last mount path
+                self.delete_volume_all_bind_mount_path(vol_id)
+            } else {
+                let mount_path_value_in_etcd = mount_path_set
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(VOLUME_BIND_MOUNT_PATH_SEPARATOR);
+                let volume_mount_paths: String = smol::run(async {
+                    self.update_to_etcd(&volume_mount_path_key, &mount_path_value_in_etcd)
+                        .await
+                })
+                .context(format!(
+                    "failed to delete mount path={} of volume ID={}",
+                    mount_path, vol_id
+                ))?;
+                Ok((&volume_mount_paths)
+                    .split(VOLUME_BIND_MOUNT_PATH_SEPARATOR)
+                    .map(std::borrow::ToOwned::to_owned)
+                    .collect())
+            }
+        } else {
+            Ok(mount_path_set)
+        }
+    }
+
+    /// Delete all bind path of a volume from etcd
+    pub fn delete_volume_all_bind_mount_path(
+        &self,
+        vol_id: &str,
+    ) -> anyhow::Result<HashSet<String>> {
         let volume_mount_path_key = format!(
             "{}/{}/{}",
             VOLUME_BIND_MOUNT_PATH_PREFIX,
             self.get_node_id(),
             vol_id,
         );
-        let target_path: String = smol::run(async {
+        let mount_paths: String = smol::run(async {
             self.delete_one_value_from_etcd(&volume_mount_path_key)
                 .await
         })?;
 
-        Ok(target_path)
+        Ok((&mount_paths)
+            .split(VOLUME_BIND_MOUNT_PATH_SEPARATOR)
+            .map(std::borrow::ToOwned::to_owned)
+            .collect())
     }
 
     /// Get volume bind mount path from etcd
-    pub fn get_volume_bind_mount_path(&self, vol_id: &str) -> anyhow::Result<String> {
+    pub fn get_volume_bind_mount_path(&self, vol_id: &str) -> anyhow::Result<HashSet<String>> {
         let volume_mount_path_key = format!(
             "{}/{}/{}",
             VOLUME_BIND_MOUNT_PATH_PREFIX,
             self.get_node_id(),
             vol_id,
         );
-        smol::run(async {
+        let pre_mount_paths: String = smol::run(async {
             self.get_at_most_one_value_from_etcd(&volume_mount_path_key)
                 .await
-        })
+        })?;
+        Ok((&pre_mount_paths)
+            .split(VOLUME_BIND_MOUNT_PATH_SEPARATOR)
+            .map(std::borrow::ToOwned::to_owned)
+            .collect())
     }
 
-    /// Write volume bind mount path to etcd
+    /// Write volume bind mount path to etcd,
+    /// if volume has multiple bind mount path, then append to the value in etcd
     fn save_volume_bind_mount_path(&self, vol_id: &str, target_path: &str) {
+        let get_mount_path_res = self.get_volume_bind_mount_path(vol_id);
+        let mut mount_path_set = match get_mount_path_res {
+            Ok(v) => v,
+            Err(_) => HashSet::new(),
+        };
         let volume_mount_path_key = format!(
             "{}/{}/{}",
             VOLUME_BIND_MOUNT_PATH_PREFIX,
@@ -1333,34 +1400,47 @@ impl MetaData {
             vol_id,
         );
         let target_path_str = target_path.to_owned();
-        let volume_mount_path_pre_value = smol::run(async {
-            self.write_to_etcd(&volume_mount_path_key, &target_path_str)
+        mount_path_set.insert(target_path_str);
+        let mount_path_value_in_etcd = mount_path_set
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(VOLUME_BIND_MOUNT_PATH_SEPARATOR);
+        let write_res = smol::run(async {
+            self.write_to_etcd(&volume_mount_path_key, &mount_path_value_in_etcd)
                 .await
         });
-        match volume_mount_path_pre_value {
-            Ok(pre_value) => {
-                if let Some(pre_mount_path) = pre_value {
-                    if pre_mount_path == target_path {
-                        warn!(
-                            "the volume has been mount to {}, \
-                                and this time mount to the same path again {}",
-                            pre_mount_path, target_path,
-                        );
-                    } else {
-                        panic!(
-                            "the volume has been mount to {}, \
-                                and this time re-mount to {}",
-                            pre_mount_path, target_path,
-                        );
-                    }
-                }
-            }
-            Err(e) => panic!(
+
+        if let Err(e) = write_res {
+            panic!(
                 "failed to write the mount path={} of volume ID={} to etcd, \
                     the error is: {}",
                 target_path, vol_id, e,
-            ),
+            );
         }
+        // match volume_mount_path_pre_value {
+        //     Ok(pre_value) => {
+        //         if let Some(pre_mount_path) = pre_value {
+        //             if pre_mount_path == target_path {
+        //                 warn!(
+        //                     "the volume has been mount to {}, \
+        //                         and this time mount to the same path again {}",
+        //                     pre_mount_path, target_path,
+        //                 );
+        //             } else {
+        //                 panic!(
+        //                     "the volume has been mount to {}, \
+        //                         and this time re-mount to {}",
+        //                     pre_mount_path, target_path,
+        //                 );
+        //             }
+        //         }
+        //     }
+        //     Err(e) => panic!(
+        //         "failed to write the mount path={} of volume ID={} to etcd, \
+        //             the error is: {}",
+        //         target_path, vol_id, e,
+        //     ),
+        // }
     }
 
     /// Bind mount volume directory to target path if root
@@ -1384,7 +1464,8 @@ impl MetaData {
                 return (
                     RpcStatusCode::INTERNAL,
                     format!(
-                        "failed to create target bind mount directory={:?}, the error is: {}",
+                        "failed to create target bind mount directory={:?}, \
+                            the error is: {}",
                         target_dir, e,
                     ),
                 );
@@ -1395,27 +1476,26 @@ impl MetaData {
         if read_only {
             mnt_flags |= MsFlags::MS_RDONLY;
         }
-        let get_res = self.get_volume_bind_mount_path(vol_id);
-        let remount = match get_res {
-            Ok(pre_target_path) => {
-                debug_assert_eq!(
-                    target_path, &pre_target_path,
-                    "only one bind mount path allowed, \
-                        the target bind mount path in etcd \
-                        not match the one given to re-mount",
-                );
-                true
+        let get_mount_path_res = self.get_volume_bind_mount_path(vol_id);
+        let bind_mount_mode = match get_mount_path_res {
+            Ok(pre_mount_path_vec) => {
+                if pre_mount_path_vec
+                    .iter()
+                    .any(|pre_mount_path| target_path == pre_mount_path)
+                {
+                    debug!("re-mount volume ID={} to path={}", vol_id, target_path);
+                    BindMountMode::Remount
+                } else {
+                    debug!("mount volume ID={} to a new path={}", vol_id, target_path);
+                    BindMountMode::Multiple
+                }
             }
-            Err(_) => false,
+            Err(_) => BindMountMode::Single,
         };
-        if remount {
-            warn!(
-                "re-mount volume ID={} to target path={}",
-                vol_id, target_path,
-            );
-            mnt_flags |= MsFlags::MS_REMOUNT;
-        }
         let mount_res = if unistd::geteuid().is_root() {
+            if let BindMountMode::Remount = bind_mount_mode {
+                mnt_flags |= MsFlags::MS_REMOUNT;
+            }
             mount::mount::<Path, Path, OsStr, OsStr>(
                 Some(&vol_path),
                 target_dir,
@@ -1445,7 +1525,7 @@ impl MetaData {
             if read_only {
                 mount_cmd.arg("-r");
             }
-            if remount {
+            if let BindMountMode::Remount = bind_mount_mode {
                 mount_cmd.arg("-m");
             }
             if !fs_type.is_empty() {

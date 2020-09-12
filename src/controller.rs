@@ -1,6 +1,6 @@
 //! The implementation for CSI controller service
 
-use grpcio::*;
+use grpcio::{Error, RpcContext, RpcStatusCode, UnarySink};
 use log::{debug, error, info};
 use protobuf::RepeatedField;
 use std::cmp::Ordering;
@@ -273,12 +273,13 @@ impl Controller for ControllerImpl {
                 let (rsc, msg) = match err {
                     Error::RpcFailure(s) => (
                         s.status,
-                        match s.details {
-                            Some(m) => m,
-                            None => format!(
+                        if let Some(m) = s.details {
+                            m
+                        } else {
+                            format!(
                                 "failed to create volume by worker at {}",
                                 worker_node.node_id,
-                            ),
+                            )
                         },
                     ),
                     e => (

@@ -1,6 +1,6 @@
 //! The implementation for CSI identity service
 
-use grpcio::*;
+use grpcio::{RpcContext, UnarySink};
 use log::debug;
 
 use super::csi::{

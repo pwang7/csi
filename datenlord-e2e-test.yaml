@@ -8,7 +8,7 @@ DriverInfo:
     block: false
     controllerExpansion: true
     exec: true
-    multipods: false
+    multipods: true
     persistence: true
     pvcDataSource: true
     snapshotDataSource: false

@@ -1,6 +1,6 @@
 //! The implementation for CSI node service
 
-use grpcio::*;
+use grpcio::{RpcContext, RpcStatusCode, UnarySink};
 use log::{debug, error, info};
 use nix::sys::stat::{self, SFlag};
 use protobuf::RepeatedField;
@@ -332,33 +332,38 @@ impl Node for NodeImpl {
                     &ctx,
                     sink,
                     RpcStatusCode::NOT_FOUND,
-                    format!("failed to find volume ID={}, the error is: {}", vol_id, e,),
+                    format!("failed to find volume ID={}, the error is: {}", vol_id, e),
                 );
             }
         };
 
-        // Does not return error for non-existent path, repeated calls OK for idempotency
+        let r = NodeUnpublishVolumeResponse::new();
+        // Do not return error for non-existent path, repeated calls OK for idempotency
         // if unistd::geteuid().is_root() {
-        let get_mount_path_res = self.meta_data.get_volume_bind_mount_path(vol_id);
-        let tolerant_umount_error = if let Ok(pre_mount_path) = get_mount_path_res {
-            debug_assert_eq!(
-                target_path, &pre_mount_path,
-                "the target path to un-mount  \
-                        not match the one stored in etcd",
-            );
-            let delete_res = self.meta_data.delete_volume_bind_mount_path(vol_id);
-            if let Err(e) = delete_res {
-                panic!(
-                    "failed to delete voluem ID={} bind path={} from etcd, the error is: {}",
-                    vol_id, pre_mount_path, e,
+        let delete_res = self
+            .meta_data
+            .delete_volume_one_bind_mount_path(vol_id, target_path);
+        let mut pre_mount_path_set = match delete_res {
+            Ok(s) => s,
+            Err(e) => {
+                error!(
+                    "failed to delete mount path={} of volume ID={} from etcd, \
+                        the error is: {}",
+                    target_path, vol_id, e,
                 );
+                return util::success(&ctx, sink, r);
             }
+        };
+        let remove_res = pre_mount_path_set.remove(target_path);
+        let tolerant_error = if remove_res {
+            debug!("the target path to un-mount found in etcd");
             false
         } else {
+            error!("the target path to un-mount not found in etcd");
             true
         };
         if let Err(e) = util::umount_volume_bind_path(target_path) {
-            if tolerant_umount_error {
+            if tolerant_error {
                 // Try to un-mount the path not stored in etcd, if error just log it
                 error!(
                     "failed to un-mount volume ID={} bind path={}, the error is: {}",
@@ -377,43 +382,47 @@ impl Node for NodeImpl {
                 vol_id, target_path,
             );
         }
-        // } else {
-        //     // Delete target_path as a symbolic link
-        //     let remove_res = fs::remove_file(&target_path);
-        //     if let Err(e) = remove_res {
-        //         error!(
-        //             "failed to remove the target path={}, the error is: {}",
-        //             target_path, e,
-        //         );
-        //     }
-        // }
-
         info!(
             "volume ID={} and name={} with target path={} has been unpublished.",
             vol_id, volume.vol_name, target_path
         );
 
-        // Delete ephemeral volume
+        // Delete ephemeral volume if no more bind mount
         // Does not return error when delete failure, repeated calls OK for idempotency
-        if volume.ephemeral {
+        if volume.ephemeral && pre_mount_path_set.is_empty() {
             let delete_ephemeral_res = self.meta_data.delete_volume_meta_data(vol_id);
-            debug_assert!(
-                delete_ephemeral_res.is_ok(),
-                format!(
-                    "failed to delete ephemeral volume ID={} and name={}",
-                    vol_id, volume.vol_name,
-                )
-            );
+            if let Err(e) = delete_ephemeral_res {
+                if tolerant_error {
+                    error!(
+                        "failed to delete ephemeral volume ID={} and name={}, \
+                            the error is: {}",
+                        vol_id, volume.vol_name, e,
+                    );
+                } else {
+                    panic!(
+                        "failed to delete ephemeral volume ID={} and name={}, \
+                            the error is: {}",
+                        vol_id, volume.vol_name, e,
+                    );
+                }
+            }
             let delete_dir_res = volume.delete_directory();
             if let Err(e) = delete_dir_res {
-                error!(
-                    "failed to delete the directory of ephemerial volume ID={}, the error is: {}",
-                    volume.vol_id, e,
-                );
+                if tolerant_error {
+                    error!(
+                        "failed to delete the directory of ephemerial volume ID={}, \
+                            the error is: {}",
+                        volume.vol_id, e,
+                    );
+                } else {
+                    panic!(
+                        "failed to delete the directory of ephemerial volume ID={}, \
+                            the error is: {}",
+                        volume.vol_id, e,
+                    );
+                }
             }
         }
-
-        let r = NodeUnpublishVolumeResponse::new();
         util::success(&ctx, sink, r)
     }
 

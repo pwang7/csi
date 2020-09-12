@@ -23,7 +23,7 @@
     variant_size_differences,
 
     // Treat warnings as errors
-    // warnings, // TODO: treat all wanings as errors
+    warnings, // treat all wanings as errors
 
     clippy::all,
     clippy::restriction,
@@ -63,6 +63,14 @@ mod csi;
 )]
 mod csi_grpc;
 #[rustfmt::skip]
+#[allow(
+    unreachable_pub,
+    clippy::all,
+    clippy::restriction,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
 mod datenlord_worker;
 #[rustfmt::skip]
 #[allow(
@@ -75,7 +83,6 @@ mod datenlord_worker;
 )]
 mod datenlord_worker_grpc;
 
-mod cast;
 mod controller;
 mod identity;
 mod meta_data;
@@ -93,7 +100,7 @@ use worker::WorkerImpl;
 
 use anyhow::Context;
 use clap::{App, Arg, ArgMatches};
-use grpcio::*;
+use grpcio::{Environment, Server};
 use log::{debug, info};
 use std::sync::Arc;
 
@@ -449,11 +456,11 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod test {
-    use super::cast::Cast;
     use super::meta_data::util;
     use super::*;
     use csi::*;
     use csi_grpc::{ControllerClient, IdentityClient, NodeClient};
+    use grpcio::{ChannelBuilder, EnvBuilder};
 
     use protobuf::RepeatedField;
     use std::fs::{self, File};
@@ -461,10 +468,14 @@ mod test {
     use std::path::{Path, PathBuf};
     use std::sync::Once;
     use std::thread;
+    use utilities::{Cast, OverflowArithmetic};
 
     const NODE_PUBLISH_VOLUME_TARGET_PATH: &str = "/tmp/target_volume_path";
+    const NODE_PUBLISH_VOLUME_TARGET_PATH_1: &str = "/tmp/target_volume_path_1";
+    const NODE_PUBLISH_VOLUME_TARGET_PATH_2: &str = "/tmp/target_volume_path_2";
     const NODE_PUBLISH_VOLUME_ID: &str = "46ebd0ee-0e6d-43c9-b90d-ccc35a913f3e";
     const ETCD_ENV_VAR_KEY: &str = "ETCD_END_POINT";
+    const WORKER_PORT_ENV_VAR_KEY: &str = "WORKER_PORT";
     const DEFAULT_ETCD_ENDPOINT_FOR_TEST: &str = "http://127.0.0.1:2379";
     static GRPC_SERVER: Once = Once::new();
 
@@ -472,10 +483,10 @@ mod test {
     fn test_all() -> anyhow::Result<()> {
         // TODO: run test case in parallel
         // Because they all depend on etcd, so cannot run in parallel now
-        test_meta_data()?;
-        test_identity_server()?;
-        test_controller_server()?;
-        test_node_server()?;
+        test_meta_data().context("test meta data failed")?;
+        test_identity_server().context("test identity server failed")?;
+        test_controller_server().context("test controller server failed")?;
+        test_node_server().context("test node server failed")?;
         Ok(())
     }
 
@@ -518,7 +529,7 @@ mod test {
             "volume name not match"
         );
 
-        let new_size_bytes = util::EPHEMERAL_VOLUME_STORAGE_CAPACITY * 2;
+        let new_size_bytes = 2.overflow_mul(util::EPHEMERAL_VOLUME_STORAGE_CAPACITY);
         let exp_vol_res = meta_data.expand(&mut volume, new_size_bytes)?;
         assert_eq!(
             exp_vol_res,
@@ -582,10 +593,27 @@ mod test {
         Path::new(util::DATA_DIR).join(vol_id)
     }
 
+    fn get_worker_port() -> u16 {
+        match std::env::var(WORKER_PORT_ENV_VAR_KEY) {
+            Ok(val) => {
+                debug!("{}={}", WORKER_PORT_ENV_VAR_KEY, val);
+                match val.parse::<u16>() {
+                    Ok(port) => port,
+                    Err(e) => panic!(
+                        "failed to parse worker port={} to u16, \
+                            the error is: {}",
+                        val, e,
+                    ),
+                }
+            }
+            Err(_) => util::DEFAULT_PORT,
+        }
+    }
+
     fn get_etcd_address_vec() -> Vec<String> {
         match std::env::var(ETCD_ENV_VAR_KEY) {
             Ok(val) => {
-                println!("{}={}", ETCD_ENV_VAR_KEY, val);
+                debug!("{}={}", ETCD_ENV_VAR_KEY, val);
                 vec![val]
             }
             Err(_) => vec![DEFAULT_ETCD_ENDPOINT_FOR_TEST.to_owned()],
@@ -619,7 +647,7 @@ mod test {
 
     fn run_server() -> anyhow::Result<()> {
         let end_point = util::END_POINT.to_owned();
-        let worker_port = util::DEFAULT_PORT;
+        let worker_port = get_worker_port();
         let node_id = util::DEFAULT_NODE_NAME.to_owned();
         let driver_name = util::CSI_PLUGIN_NAME.to_owned();
         let data_dir = util::DATA_DIR.to_owned();
@@ -889,13 +917,13 @@ mod test {
             .map(|vol| vol.get_volume().get_volume_id())
             .collect::<Vec<_>>();
         vol_vec2.sort();
-        let end_pos = starting_pos + max_entries.cast::<usize>();
+        let end_pos = starting_pos.overflow_add(max_entries.cast::<usize>());
         let mut expect_vol_vec2 = all_vol_vec
             .get(starting_pos..end_pos)
             .map_or(Vec::new(), std::borrow::ToOwned::to_owned);
         expect_vol_vec2.sort();
         assert_eq!(vol_vec2, expect_vol_vec2, "list volume result not match");
-        let next_starting_pos = starting_pos + max_entries.cast::<usize>();
+        let next_starting_pos = starting_pos.overflow_add(max_entries.cast::<usize>());
         assert_eq!(
             list_vol_resp2.get_next_token(),
             next_starting_pos.to_string(),
@@ -1377,8 +1405,17 @@ mod test {
     }
 
     fn test_node_server() -> anyhow::Result<()> {
-        let client = build_node_client()?;
+        let node_client = build_node_client()?;
 
+        test_node_server_publish_unpublish(&node_client)
+            .context("failed to test node publish unpublish")?;
+        test_node_server_remount_publish(&node_client).context("failed to test node remount")?;
+        test_node_server_multiple_publish(&node_client)
+            .context("failed to test node multi-mount")?;
+        Ok(())
+    }
+
+    fn test_node_server_publish_unpublish(client: &NodeClient) -> anyhow::Result<()> {
         // Test node get capabilities
         let cap_req = NodeGetCapabilitiesRequest::new();
         let cap_resp = client
@@ -1469,10 +1506,111 @@ mod test {
         unpub_req.set_volume_id(vol_id.to_owned());
         unpub_req.set_target_path(target_path.to_owned());
 
+        let _unpub_resp1 = client
+            .node_unpublish_volume(&unpub_req)
+            .context("failed to get NodeUnpublishVolumeResponse")?;
+
+        Ok(())
+    }
+
+    fn test_node_server_remount_publish(client: &NodeClient) -> anyhow::Result<()> {
+        // First publish volume
+        let target_path = NODE_PUBLISH_VOLUME_TARGET_PATH;
+        let vol_id = NODE_PUBLISH_VOLUME_ID;
+        let mut mount_option = VolumeCapability_MountVolume::new();
+        mount_option.set_fs_type("fuse".to_owned());
+        mount_option.set_mount_flags(protobuf::RepeatedField::from_vec(vec![
+            "nosuid".to_owned(),
+            "nodev".to_owned(),
+        ]));
+        let mut vc = VolumeCapability::new();
+        vc.set_mount(mount_option);
+        vc.mut_access_mode()
+            .set_mode(VolumeCapability_AccessMode_Mode::SINGLE_NODE_WRITER);
+        let mut pub_req = NodePublishVolumeRequest::new();
+        pub_req.set_volume_id(vol_id.to_owned());
+        pub_req.set_volume_capability(vc);
+        pub_req.set_target_path(target_path.to_owned());
+        pub_req.set_readonly(false);
+        pub_req
+            .mut_volume_context()
+            .insert(util::EPHEMERAL_KEY_CONTEXT.to_owned(), "true".to_owned());
+
+        let _pub_resp1 = client
+            .node_publish_volume(&pub_req)
+            .context("failed to get first NodePublishVolumeResponse when test remount")?;
+
+        // Second publish volume
+        pub_req.set_readonly(true);
+
+        let _pub_resp2 = client
+            .node_publish_volume(&pub_req)
+            .context("failed to get second NodePublishVolumeResponse when test remount")?;
+
+        // Test unpublish volume
+        let mut unpub_req = NodeUnpublishVolumeRequest::new();
+        unpub_req.set_volume_id(vol_id.to_owned());
+        unpub_req.set_target_path(target_path.to_owned());
+
         let _unpub_resp = client
             .node_unpublish_volume(&unpub_req)
             .context("failed to get NodeUnpublishVolumeResponse")?;
 
+        // Verify second unpublish volume result should fail
+        let failed_unpub_resp1 = client.node_unpublish_volume(&unpub_req);
+        assert!(failed_unpub_resp1.is_err(), "unpublish again should fail");
+
+        Ok(())
+    }
+
+    fn test_node_server_multiple_publish(client: &NodeClient) -> anyhow::Result<()> {
+        // First publish volume
+        let target_path1 = NODE_PUBLISH_VOLUME_TARGET_PATH_1;
+        let vol_id = NODE_PUBLISH_VOLUME_ID;
+        let mut mount_option = VolumeCapability_MountVolume::new();
+        mount_option.set_fs_type("fuse".to_owned());
+        mount_option.set_mount_flags(protobuf::RepeatedField::from_vec(vec![
+            "nosuid".to_owned(),
+            "nodev".to_owned(),
+        ]));
+        let mut vc = VolumeCapability::new();
+        vc.set_mount(mount_option);
+        vc.mut_access_mode()
+            .set_mode(VolumeCapability_AccessMode_Mode::SINGLE_NODE_WRITER);
+        let mut pub_req = NodePublishVolumeRequest::new();
+        pub_req.set_volume_id(vol_id.to_owned());
+        pub_req.set_volume_capability(vc);
+        pub_req.set_target_path(target_path1.to_owned());
+        pub_req.set_readonly(false);
+        pub_req
+            .mut_volume_context()
+            .insert(util::EPHEMERAL_KEY_CONTEXT.to_owned(), "true".to_owned());
+
+        let _pub_resp1 = client
+            .node_publish_volume(&pub_req)
+            .context("failed to get first NodePublishVolumeResponse")?;
+
+        // Second publish volume
+        let target_path2 = NODE_PUBLISH_VOLUME_TARGET_PATH_2;
+        pub_req.set_target_path(target_path2.to_owned());
+        let _pub_resp2 = client
+            .node_publish_volume(&pub_req)
+            .context("failed to get second NodePublishVolumeResponse")?;
+
+        // First unpublish volume
+        let mut unpub_req = NodeUnpublishVolumeRequest::new();
+        unpub_req.set_volume_id(vol_id.to_owned());
+        unpub_req.set_target_path(target_path1.to_owned());
+
+        let _unpub_resp1 = client
+            .node_unpublish_volume(&unpub_req)
+            .context("failed to get first NodeUnpublishVolumeResponse")?;
+
+        // Second unpublish volume
+        unpub_req.set_target_path(target_path2.to_owned());
+        let _unpub_resp2 = client
+            .node_unpublish_volume(&unpub_req)
+            .context("failed to get first NodeUnpublishVolumeResponse")?;
         Ok(())
     }
 }

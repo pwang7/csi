@@ -150,8 +150,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if do_umount {
-        mount::umount(umount_path.clone())
-            .context(format!("failed to umount {:?}", umount_path))?;
+        mount::umount(umount_path).context(format!("failed to umount {:?}", umount_path))?;
     } else {
         mount::mount::<Path, Path, OsStr, OsStr>(
             Some(&from_path),

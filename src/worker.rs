@@ -1,12 +1,12 @@
 //! The implementation for `DatenLord` worker service
 
-use grpcio::*;
+use grpcio::{RpcContext, RpcStatusCode, UnarySink};
 use log::{debug, error, info};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use super::csi::*;
-use super::datenlord_worker_grpc::*;
+use super::datenlord_worker_grpc::Worker;
 use super::meta_data::{util, DatenLordVolume, MetaData, VolumeSource};
 
 /// for `DatenLord` worker implementation
