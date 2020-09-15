@@ -9,7 +9,7 @@ use super::csi::{
     ProbeResponse,
 };
 use super::csi_grpc::Identity;
-use super::meta_data::util;
+use super::util;
 
 /// for `IdentityService` implmentation
 #[derive(Clone)]

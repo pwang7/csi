@@ -16,7 +16,8 @@ use super::csi::{
     VolumeCapability_oneof_access_type,
 };
 use super::csi_grpc::Node;
-use super::meta_data::{util, DatenLordVolume, MetaData};
+use super::meta_data::{DatenLordVolume, MetaData};
+use super::util;
 
 /// for `NodeService` implementation
 #[derive(Clone)]
@@ -166,8 +167,8 @@ impl Node for NodeImpl {
                 "volume ID missing in request".to_owned(),
             );
         }
-        let target_path = req.get_target_path();
-        if target_path.is_empty() {
+        let target_dir = req.get_target_path();
+        if target_dir.is_empty() {
             return util::fail(
                 &ctx,
                 sink,
@@ -175,7 +176,6 @@ impl Node for NodeImpl {
                 "target path missing in request".to_owned(),
             );
         }
-        // TODO: handle read only volume in FUSE
         let read_only = req.get_readonly();
         let volume_context = req.get_volume_context();
         let device_id = match volume_context.get("deviceID") {
@@ -220,14 +220,11 @@ impl Node for NodeImpl {
                     );
                 }
             };
-
             info!(
                 "ephemeral mode: created volume ID={} and name={}",
                 volume.vol_id, volume.vol_name,
             );
-            let add_ephemeral_res = self
-                .meta_data
-                .add_volume_meta_data(vol_id.to_owned(), &volume);
+            let add_ephemeral_res = self.meta_data.add_volume_meta_data(vol_id, &volume);
             debug_assert!(
                 add_ephemeral_res.is_ok(),
                 format!(
@@ -255,7 +252,7 @@ impl Node for NodeImpl {
                     info!(
                         "target={}\nfstype={}\ndevice={}\nreadonly={}\n\
                             volume ID={}\nattributes={:?}\nmountflags={}\n",
-                        target_path,
+                        target_dir,
                         fs_type,
                         device_id,
                         read_only,
@@ -263,29 +260,15 @@ impl Node for NodeImpl {
                         volume_context,
                         mount_options,
                     );
-                    // Bind mount from target_path to vol_path
+                    // Bind mount from target_dir to vol_path
                     let (rpc_status_code, err_msg) = self.meta_data.bind_mount(
-                        target_path,
+                        target_dir,
                         fs_type,
                         read_only,
                         vol_id,
                         &mount_options,
                         ephemeral,
                     );
-                    // let (rpc_status_code, err_msg) = if unistd::geteuid().is_root() {
-                    //     // Bind mount from target_path to vol_path if run as root
-                    //     self.meta_data.bind_mount(
-                    //         target_path,
-                    //         fs_type,
-                    //         read_only,
-                    //         vol_id,
-                    //         &mount_options,
-                    //         ephemeral,
-                    //     )
-                    // } else {
-                    //     // Build symlink from target_path to vol_path if run as non-root
-                    //     self.meta_data.symbolic_link(target_path, vol_id, ephemeral)
-                    // };
                     if RpcStatusCode::OK != rpc_status_code {
                         return util::fail(&ctx, sink, rpc_status_code, err_msg);
                     }
@@ -334,14 +317,14 @@ impl Node for NodeImpl {
         }
 
         let volume = match self.meta_data.get_volume_by_id(vol_id) {
-            Ok(v) => v,
-            Err(e) => {
+            Some(v) => v,
+            None => {
                 return util::fail(
                     &ctx,
                     sink,
                     RpcStatusCode::NOT_FOUND,
-                    format!("failed to find volume ID={}, the error is: {}", vol_id, e),
-                );
+                    format!("failed to find volume ID={}", vol_id),
+                )
             }
         };
 
@@ -367,13 +350,16 @@ impl Node for NodeImpl {
             debug!("the target path to un-mount found in etcd");
             false
         } else {
-            error!("the target path to un-mount not found in etcd");
+            warn!(
+                "the target path={} to un-mount not found in etcd",
+                target_path
+            );
             true
         };
         if let Err(e) = util::umount_volume_bind_path(target_path) {
             if tolerant_error {
                 // Try to un-mount the path not stored in etcd, if error just log it
-                error!(
+                warn!(
                     "failed to un-mount volume ID={} bind path={}, the error is: {}",
                     vol_id, target_path, e,
                 );

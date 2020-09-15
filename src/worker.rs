@@ -10,7 +10,8 @@ use super::csi::{
     DeleteSnapshotRequest, DeleteSnapshotResponse, DeleteVolumeRequest, DeleteVolumeResponse,
 };
 use super::datenlord_worker_grpc::Worker;
-use super::meta_data::{util, DatenLordVolume, MetaData, VolumeSource};
+use super::meta_data::{DatenLordVolume, MetaData, VolumeSource};
+use super::util;
 
 /// for `DatenLord` worker implementation
 #[derive(Clone)]
@@ -46,21 +47,24 @@ impl Worker for WorkerImpl {
             self.meta_data.get_node_id(),
             &self.meta_data.get_volume_path(&vol_id_str),
         );
-        let volume =
-            match vol_res {
-                Ok(v) => v,
-                Err(e) => {
-                    return util::fail(
-                        &ctx,
-                        sink,
-                        RpcStatusCode::INTERNAL,
-                        format!(
-                        "failed to create volume ID={} and name={} on node ID={}, the errir is: {}",
-                        vol_id, vol_name, self.meta_data.get_node_id(), e,
+        let volume = match vol_res {
+            Ok(v) => v,
+            Err(e) => {
+                return util::fail(
+                    &ctx,
+                    sink,
+                    RpcStatusCode::INTERNAL,
+                    format!(
+                        "failed to create volume ID={} and name={} on node ID={}, \
+                                the errir is: {}",
+                        vol_id,
+                        vol_name,
+                        self.meta_data.get_node_id(),
+                        e,
                     ),
-                    );
-                }
-            };
+                );
+            }
+        };
         if let Some(content_source) = &volume.content_source {
             match content_source {
                 VolumeSource::Snapshot(source_snapshot_id) => {
@@ -128,9 +132,7 @@ impl Worker for WorkerImpl {
             vol_name,
             self.meta_data.get_node_id(),
         );
-        let add_res = self
-            .meta_data
-            .add_volume_meta_data(volume.vol_id.to_owned(), &volume);
+        let add_res = self.meta_data.add_volume_meta_data(&volume.vol_id, &volume);
         debug_assert!(
             add_res.is_ok(),
             "volume with the same ID={} exists on node ID={}, impossible case",
@@ -220,7 +222,7 @@ impl Worker for WorkerImpl {
                     Ok(r) => {
                         let add_res = self
                             .meta_data
-                            .add_snapshot_meta_data(snap_id_str, &snapshot);
+                            .add_snapshot_meta_data(&snap_id_str, &snapshot);
                         debug_assert!(
                             add_res.is_ok(),
                             "snapshot with the same ID={} exists on node ID={}, impossible case",

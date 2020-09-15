@@ -84,18 +84,19 @@ mod datenlord_worker;
 mod datenlord_worker_grpc;
 
 mod controller;
+mod etcd_client;
 mod identity;
 mod meta_data;
 mod node;
+mod util;
 mod worker;
 
 use controller::ControllerImpl;
+use etcd_client::EtcdClient;
 use identity::IdentityImpl;
-use meta_data::{
-    util::{self, RunAsRole},
-    MetaData,
-};
+use meta_data::MetaData;
 use node::NodeImpl;
+use util::RunAsRole;
 use worker::WorkerImpl;
 
 use anyhow::Context;
@@ -112,7 +113,7 @@ fn build_grpc_servers(
     driver_name: String,
     data_dir: String,
     run_as: RunAsRole,
-    etcd_client: etcd_rs::Client,
+    etcd_client: EtcdClient,
 ) -> anyhow::Result<(Server, Server)> {
     remove_socket_file(&end_point);
     remove_socket_file(util::LOCAL_WORKER_SOCKET);
@@ -241,24 +242,6 @@ fn run_async_servers(csi_server: Server, worker_server: Server) {
     smol::run(async move {
         run_server(csi_server, worker_server).await;
     });
-}
-
-/// Build etcd client
-fn build_etcd_client(etcd_address_vec: Vec<String>) -> anyhow::Result<etcd_rs::Client> {
-    let etcd_client = smol::run(async move {
-        etcd_rs::Client::connect(etcd_rs::ClientConfig {
-            endpoints: etcd_address_vec.clone(),
-            auth: None,
-        })
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(format!(
-                "failed to build etcd client to {:?}, the error is: {}",
-                etcd_address_vec, e,
-            ))
-        })
-    })?;
-    Ok(etcd_client)
 }
 
 /// Argument name of end point
@@ -435,7 +418,7 @@ fn main() -> anyhow::Result<()> {
         etcd_address_vec,
     );
 
-    let etcd_client = build_etcd_client(etcd_address_vec)?;
+    let etcd_client = EtcdClient::new(etcd_address_vec)?;
     let (csi_server, worker_server) = build_grpc_servers(
         end_point,
         worker_port,
@@ -456,7 +439,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod test {
-    use super::meta_data::util;
+    use super::util;
     use super::*;
     use csi::{
         ControllerExpandVolumeRequest, ControllerExpandVolumeResponse, CreateSnapshotRequest,
@@ -470,8 +453,9 @@ mod test {
         VolumeCapability_MountVolume,
     };
     use csi_grpc::{ControllerClient, IdentityClient, NodeClient};
-    use grpcio::{ChannelBuilder, EnvBuilder};
 
+    use anyhow::anyhow;
+    use grpcio::{ChannelBuilder, EnvBuilder};
     use protobuf::RepeatedField;
     use std::fs::{self, File};
     use std::io::prelude::*;
@@ -484,9 +468,9 @@ mod test {
     const NODE_PUBLISH_VOLUME_TARGET_PATH_1: &str = "/tmp/target_volume_path_1";
     const NODE_PUBLISH_VOLUME_TARGET_PATH_2: &str = "/tmp/target_volume_path_2";
     const NODE_PUBLISH_VOLUME_ID: &str = "46ebd0ee-0e6d-43c9-b90d-ccc35a913f3e";
+    const DEFAULT_ETCD_ENDPOINT_FOR_TEST: &str = "http://127.0.0.1:2379";
     const ETCD_ENV_VAR_KEY: &str = "ETCD_END_POINT";
     const WORKER_PORT_ENV_VAR_KEY: &str = "WORKER_PORT";
-    const DEFAULT_ETCD_ENDPOINT_FOR_TEST: &str = "http://127.0.0.1:2379";
     static GRPC_SERVER: Once = Once::new();
 
     #[test]
@@ -500,9 +484,38 @@ mod test {
         Ok(())
     }
 
+    fn get_etcd_address_vec() -> Vec<String> {
+        match std::env::var(ETCD_ENV_VAR_KEY) {
+            Ok(val) => {
+                debug!("{}={}", ETCD_ENV_VAR_KEY, val);
+                vec![val]
+            }
+            Err(_) => vec![DEFAULT_ETCD_ENDPOINT_FOR_TEST.to_owned()],
+        }
+    }
+
+    fn clear_test_data(etcd_client: &EtcdClient) -> anyhow::Result<()> {
+        let dir_path = Path::new(util::DATA_DIR);
+        if dir_path.exists() {
+            fs::remove_dir_all(dir_path)?;
+        }
+        let node_volume_publish_path = Path::new(NODE_PUBLISH_VOLUME_TARGET_PATH);
+        if node_volume_publish_path.exists() {
+            let umount_res = util::umount_volume_bind_path(NODE_PUBLISH_VOLUME_TARGET_PATH);
+            debug!(
+                "un-mount {} result: {:?}",
+                NODE_PUBLISH_VOLUME_TARGET_PATH, umount_res
+            );
+            fs::remove_dir_all(NODE_PUBLISH_VOLUME_TARGET_PATH)?;
+        }
+
+        etcd_client.delete_all()?;
+        Ok(())
+    }
+
     fn test_meta_data() -> anyhow::Result<()> {
         let etcd_address_vec = get_etcd_address_vec();
-        let etcd_client = build_etcd_client(etcd_address_vec)?;
+        let etcd_client = EtcdClient::new(etcd_address_vec)?;
         clear_test_data(&etcd_client)?;
 
         let worker_port = util::DEFAULT_PORT;
@@ -528,12 +541,17 @@ mod test {
             util::DEFAULT_NODE_NAME,
             meta_data.get_volume_path(NODE_PUBLISH_VOLUME_ID).as_path(), // vol_path
         )?;
-        let add_vol_res = meta_data.add_volume_meta_data(vol_id.to_owned(), &volume);
+        let add_vol_res = meta_data.add_volume_meta_data(vol_id, &volume);
         assert!(
             add_vol_res.is_ok(),
             "failed to add new volume meta data to etcd"
         );
-        let get_vol_res = meta_data.get_volume_by_name(&volume.vol_name)?;
+        let get_vol_res = meta_data
+            .get_volume_by_name(&volume.vol_name)
+            .ok_or(anyhow!(format!(
+                "failed to find volume by name={}",
+                volume.vol_name,
+            )))?;
         assert_eq!(
             get_vol_res.vol_name, volume.vol_name,
             "volume name not match"
@@ -547,7 +565,9 @@ mod test {
             "the old size before expand not match"
         );
 
-        let expanded_vol = meta_data.get_volume_by_id(vol_id)?;
+        let expanded_vol = meta_data
+            .get_volume_by_id(vol_id)
+            .ok_or(anyhow!(format!("failed to find volume ID={}", vol_id)))?;
         assert_eq!(
             expanded_vol.size_bytes, new_size_bytes,
             "the expanded volume size not match"
@@ -571,31 +591,41 @@ mod test {
             0,    // size_bytes,
             true, // ready_to_use,
         );
-        let add_snap_res = meta_data.add_snapshot_meta_data(snap_id.to_owned(), &snapshot);
+        let add_snap_res = meta_data.add_snapshot_meta_data(snap_id, &snapshot);
         assert!(
             add_snap_res.is_ok(),
             "failed to add new snapshot meta data to etcd"
         );
-        let get_snap_by_name_res = meta_data.get_snapshot_by_name(&snapshot.snap_name)?;
+        let get_snap_by_name_res =
+            meta_data
+                .get_snapshot_by_name(&snapshot.snap_name)
+                .ok_or(anyhow!(format!(
+                    "failed to find snapshot by name={}",
+                    snapshot.snap_name,
+                )))?;
         assert_eq!(
             get_snap_by_name_res.snap_name, snapshot.snap_name,
             "snapshot name not match"
         );
 
-        let get_snap_by_src_vol_id_res =
-            meta_data.get_snapshot_by_src_volume_id(&snapshot.vol_id)?;
+        let get_snap_by_src_vol_id_res = meta_data
+            .get_snapshot_by_src_volume_id(&snapshot.vol_id)
+            .ok_or(anyhow!(format!(
+                "failed to find snapshot by source volume ID={}",
+                snapshot.vol_id,
+            )))?;
         assert_eq!(
             get_snap_by_src_vol_id_res.vol_id, snapshot.vol_id,
             "snapshot source volume ID not match"
         );
 
-        let del_vol_res = meta_data.delete_volume_meta_data(vol_id)?;
-        assert_eq!(del_vol_res.vol_id, vol_id, "deleted volume ID not match");
         let del_snap_res = meta_data.delete_snapshot_meta_data(snap_id)?;
         assert_eq!(
             del_snap_res.snap_id, snap_id,
             "deleted snapshot ID not match"
         );
+        let del_vol_res = meta_data.delete_volume_meta_data(vol_id)?;
+        assert_eq!(del_vol_res.vol_id, vol_id, "deleted volume ID not match");
         Ok(())
     }
 
@@ -620,41 +650,6 @@ mod test {
         }
     }
 
-    fn get_etcd_address_vec() -> Vec<String> {
-        match std::env::var(ETCD_ENV_VAR_KEY) {
-            Ok(val) => {
-                debug!("{}={}", ETCD_ENV_VAR_KEY, val);
-                vec![val]
-            }
-            Err(_) => vec![DEFAULT_ETCD_ENDPOINT_FOR_TEST.to_owned()],
-        }
-    }
-
-    fn clear_test_data(etcd_client: &etcd_rs::Client) -> anyhow::Result<()> {
-        let dir_path = Path::new(util::DATA_DIR);
-        if dir_path.exists() {
-            fs::remove_dir_all(dir_path)?;
-        }
-        let node_volume_publish_path = Path::new(NODE_PUBLISH_VOLUME_TARGET_PATH);
-        if node_volume_publish_path.exists() {
-            let umount_res = util::umount_volume_bind_path(NODE_PUBLISH_VOLUME_TARGET_PATH);
-            debug!(
-                "un-mount {} result: {:?}",
-                NODE_PUBLISH_VOLUME_TARGET_PATH, umount_res
-            );
-            fs::remove_dir_all(NODE_PUBLISH_VOLUME_TARGET_PATH)?;
-        }
-
-        let req = etcd_rs::DeleteRequest::new(etcd_rs::KeyRange::all());
-        let _ = smol::run(async move {
-            etcd_client.kv().delete(req).await.map_err(|e| {
-                anyhow::anyhow!("failed to clear all data from etcd, the error is: {}", e,)
-            })
-        })?;
-
-        Ok(())
-    }
-
     fn run_server() -> anyhow::Result<()> {
         let end_point = util::END_POINT.to_owned();
         let worker_port = get_worker_port();
@@ -663,7 +658,7 @@ mod test {
         let data_dir = util::DATA_DIR.to_owned();
         let run_as = RunAsRole::Both;
         let etcd_address_vec = get_etcd_address_vec();
-        let etcd_client = build_etcd_client(etcd_address_vec)?;
+        let etcd_client = EtcdClient::new(etcd_address_vec)?;
 
         let async_server = false;
         GRPC_SERVER.call_once(move || {
