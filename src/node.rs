@@ -1,12 +1,20 @@
 //! The implementation for CSI node service
 
 use grpcio::{RpcContext, RpcStatusCode, UnarySink};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use nix::sys::stat::{self, SFlag};
 use protobuf::RepeatedField;
 use std::sync::Arc;
 
-use super::csi::*;
+use super::csi::{
+    NodeExpandVolumeRequest, NodeExpandVolumeResponse, NodeGetCapabilitiesRequest,
+    NodeGetCapabilitiesResponse, NodeGetInfoRequest, NodeGetInfoResponse,
+    NodeGetVolumeStatsRequest, NodeGetVolumeStatsResponse, NodePublishVolumeRequest,
+    NodePublishVolumeResponse, NodeServiceCapability, NodeServiceCapability_RPC_Type,
+    NodeStageVolumeRequest, NodeStageVolumeResponse, NodeUnpublishVolumeRequest,
+    NodeUnpublishVolumeResponse, NodeUnstageVolumeRequest, NodeUnstageVolumeResponse, Topology,
+    VolumeCapability_oneof_access_type,
+};
 use super::csi_grpc::Node;
 use super::meta_data::{util, DatenLordVolume, MetaData};
 
@@ -346,7 +354,7 @@ impl Node for NodeImpl {
         let mut pre_mount_path_set = match delete_res {
             Ok(s) => s,
             Err(e) => {
-                error!(
+                warn!(
                     "failed to delete mount path={} of volume ID={} from etcd, \
                         the error is: {}",
                     target_path, vol_id, e,

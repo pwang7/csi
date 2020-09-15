@@ -11,6 +11,6 @@ DriverInfo:
     multipods: true
     persistence: true
     pvcDataSource: true
-    snapshotDataSource: false
+    snapshotDataSource: true
 InlineVolumes:
 - Attributes: {}

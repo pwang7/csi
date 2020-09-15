@@ -1,12 +1,24 @@
 //! The implementation for CSI controller service
 
 use grpcio::{Error, RpcContext, RpcStatusCode, UnarySink};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use protobuf::RepeatedField;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::csi::*;
+use super::csi::{
+    ControllerExpandVolumeRequest, ControllerExpandVolumeResponse,
+    ControllerGetCapabilitiesRequest, ControllerGetCapabilitiesResponse,
+    ControllerGetVolumeRequest, ControllerGetVolumeResponse, ControllerPublishVolumeRequest,
+    ControllerPublishVolumeResponse, ControllerServiceCapability,
+    ControllerServiceCapability_RPC_Type, ControllerUnpublishVolumeRequest,
+    ControllerUnpublishVolumeResponse, CreateSnapshotRequest, CreateSnapshotResponse,
+    CreateVolumeRequest, CreateVolumeResponse, DeleteSnapshotRequest, DeleteSnapshotResponse,
+    DeleteVolumeRequest, DeleteVolumeResponse, GetCapacityRequest, GetCapacityResponse,
+    ListSnapshotsRequest, ListSnapshotsResponse, ListVolumesRequest, ListVolumesResponse,
+    ValidateVolumeCapabilitiesRequest, ValidateVolumeCapabilitiesResponse, VolumeCapability,
+    VolumeCapability_AccessMode_Mode, VolumeContentSource_oneof_type,
+};
 use super::csi_grpc::Controller;
 use super::meta_data::{util, MetaData, VolumeSource};
 
@@ -282,7 +294,15 @@ impl Controller for ControllerImpl {
                             )
                         },
                     ),
-                    e => (
+                    e @ grpcio::Error::Codec(..)
+                    | e @ grpcio::Error::CallFailure(..)
+                    | e @ grpcio::Error::RpcFinished(..)
+                    | e @ grpcio::Error::RemoteStopped
+                    | e @ grpcio::Error::ShutdownFailed
+                    | e @ grpcio::Error::BindFail(..)
+                    | e @ grpcio::Error::QueueShutdown
+                    | e @ grpcio::Error::GoogleAuthenticationFailed
+                    | e @ grpcio::Error::InvalidMetadata(..) => (
                         RpcStatusCode::INTERNAL,
                         format!("failed to create volume, the error is: {}", e),
                     ),
@@ -330,7 +350,7 @@ impl Controller for ControllerImpl {
                 match worker_delete_res {
                     Ok(_) => info!("successfully deleted volume ID={}", vol_id),
                     Err(e) => {
-                        error!(
+                        warn!(
                             "failed to delete volume ID={} on node ID={}, the error is: {}",
                             vol_id, vol.node_id, e,
                         );
@@ -338,7 +358,7 @@ impl Controller for ControllerImpl {
                 }
             }
             Err(e) => {
-                error!(
+                warn!(
                     "failed to find volume ID={} to delete on controller ID={}, the error is: {}",
                     vol_id,
                     self.meta_data.get_node_id(),
@@ -461,52 +481,6 @@ impl Controller for ControllerImpl {
 
         let max_entries = req.get_max_entries();
         let starting_token = req.get_starting_token();
-        // let num_vols = self.meta_data.get_num_of_volumes();
-        // let starting_pos = if starting_token.is_empty() {
-        //     0
-        // } else if let Ok(i) = starting_token.parse::<usize>() {
-        //     i
-        // } else {
-        //     return util::fail(
-        //         &ctx,
-        //         sink,
-        //         RpcStatusCode::ABORTED,
-        //         format!("invalid starting position {}", starting_token),
-        //     );
-        // };
-        // if starting_pos > 0 && starting_pos >= num_vols {
-        //     return util::fail(&ctx, sink,
-        //         RpcStatusCode::ABORTED,
-        //         format!(
-        //             "invalid starting token={}, larger than or equal to the list size={} of volumes",
-        //             starting_token,
-        //             num_vols,
-        //         ),
-        //     );
-        // }
-        // let (remaining, ofr) = num_vols.overflowing_sub(starting_pos);
-        // debug_assert!(
-        //     !ofr,
-        //     "num_vols={} subtract num_to_list={} overflowed",
-        //     num_vols, starting_pos,
-        // );
-
-        // let num_to_list = if max_entries > 0 {
-        //     if remaining < max_entries.cast() {
-        //         remaining
-        //     } else {
-        //         max_entries.cast()
-        //     }
-        // } else {
-        //     remaining
-        // };
-        // let (next_pos, ofnp) = starting_pos.overflowing_add(num_to_list);
-        // debug_assert!(
-        //     !ofnp,
-        //     "sarting_pos={} add num_to_list={} overflowed",
-        //     starting_pos, num_to_list,
-        // );
-
         let (vol_vec, next_pos) = match self.meta_data.list_volumes(starting_token, max_entries) {
             Ok((rpc_status_code, err_msg, vol_vec, next_pos)) => {
                 if RpcStatusCode::OK == rpc_status_code {
@@ -516,7 +490,7 @@ impl Controller for ControllerImpl {
                 }
             }
             Err(e) => {
-                error!(
+                warn!(
                     "failed to list volumes from starting position={} and \
                         max entries={}, the error is: {}",
                     starting_token, max_entries, e,
@@ -722,7 +696,7 @@ impl Controller for ControllerImpl {
                 }
             }
             Err(e) => {
-                error!(
+                warn!(
                     "failed to find snapshot ID={} to delete, the error is: {}",
                     snap_id, e,
                 );
@@ -775,7 +749,7 @@ impl Controller for ControllerImpl {
                     return util::success(&ctx, sink, r);
                 }
                 Err(e) => {
-                    error!(
+                    warn!(
                         "failed to list snapshot ID={}, the error is: {}",
                         snap_id, e,
                     );
@@ -809,7 +783,7 @@ impl Controller for ControllerImpl {
                     return util::success(&ctx, sink, r);
                 }
                 Err(e) => {
-                    error!(
+                    warn!(
                         "failed to list snapshot with source volume ID={}, the error is: {}",
                         src_volume_id, e,
                     );
@@ -822,37 +796,6 @@ impl Controller for ControllerImpl {
         // case 3: no parameter is set, so return all the snapshots
         let max_entries = req.get_max_entries();
         let starting_token = req.get_starting_token();
-        // let num_snaps = self.meta_data.get_num_of_snapshots();
-        // let starting_pos = if starting_token.is_empty() {
-        //     0
-        // } else if let Ok(i) = starting_token.parse::<usize>() {
-        //     i
-        // } else {
-        //     return util::fail(
-        //         &ctx,
-        //         sink,
-        //         RpcStatusCode::ABORTED,
-        //         format!("invalid starting position {}", starting_token),
-        //     );
-        // };
-        // if starting_pos > 0 && starting_pos >= num_snaps {
-        //     return util::fail(&ctx, sink, RpcStatusCode::ABORTED, format!(
-        //             "invalid starting token={}, larger than or equal to the list size={} of snapshots",
-        //             starting_token,
-        //             num_snaps,
-        //         ),);
-        // }
-        // let remaining = num_snaps - starting_pos;
-        // let num_to_list = if max_entries > 0 {
-        //     if remaining < max_entries.cast() {
-        //         remaining
-        //     } else {
-        //         max_entries.cast()
-        //     }
-        // } else {
-        //     remaining
-        // };
-        // let next_pos = starting_pos + num_to_list;
         let (snap_vec, next_pos) = match self.meta_data.list_snapshots(starting_token, max_entries)
         {
             Ok((rpc_status_code, err_msg, snap_vec, next_pos)) => {

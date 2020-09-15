@@ -1,11 +1,14 @@
 //! The implementation for `DatenLord` worker service
 
 use grpcio::{RpcContext, RpcStatusCode, UnarySink};
-use log::{debug, error, info};
+use log::{debug, info, warn};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::csi::*;
+use super::csi::{
+    CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest, CreateVolumeResponse,
+    DeleteSnapshotRequest, DeleteSnapshotResponse, DeleteVolumeRequest, DeleteVolumeResponse,
+};
 use super::datenlord_worker_grpc::Worker;
 use super::meta_data::{util, DatenLordVolume, MetaData, VolumeSource};
 
@@ -76,7 +79,7 @@ impl Worker for WorkerImpl {
                             self.meta_data.get_node_id(),
                         );
                     } else {
-                        error!(
+                        warn!(
                             "failed to populate volume ID={} and name={} from source snapshot ID={}, \
                                 the error is: {}",
                             vol_id,
@@ -103,7 +106,7 @@ impl Worker for WorkerImpl {
                             self.meta_data.get_node_id(),
                         );
                     } else {
-                        error!(
+                        warn!(
                             "failed to populate volume ID={} and name={} \
                                 from source volume ID={} on node ID={} \
                                 the error is: {}",

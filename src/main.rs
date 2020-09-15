@@ -458,7 +458,17 @@ fn main() -> anyhow::Result<()> {
 mod test {
     use super::meta_data::util;
     use super::*;
-    use csi::*;
+    use csi::{
+        ControllerExpandVolumeRequest, ControllerExpandVolumeResponse, CreateSnapshotRequest,
+        CreateSnapshotResponse, CreateVolumeRequest, CreateVolumeResponse, DeleteSnapshotRequest,
+        DeleteSnapshotResponse, DeleteVolumeRequest, DeleteVolumeResponse,
+        GetPluginCapabilitiesRequest, GetPluginInfoRequest, ListSnapshotsRequest,
+        ListSnapshotsResponse, ListVolumesRequest, ListVolumesResponse, NodeExpandVolumeRequest,
+        NodeGetCapabilitiesRequest, NodeGetInfoRequest, NodePublishVolumeRequest,
+        NodeServiceCapability_RPC_Type, NodeUnpublishVolumeRequest, PluginCapability_Service_Type,
+        ProbeRequest, VolumeCapability, VolumeCapability_AccessMode_Mode,
+        VolumeCapability_MountVolume,
+    };
     use csi_grpc::{ControllerClient, IdentityClient, NodeClient};
     use grpcio::{ChannelBuilder, EnvBuilder};
 

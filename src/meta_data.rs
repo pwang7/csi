@@ -2,7 +2,6 @@
 
 use anyhow::{anyhow, Context};
 // use etcd_rs::*;
-use futures::prelude::*;
 use grpcio::{ChannelBuilder, Environment, RpcContext, RpcStatus, RpcStatusCode, UnarySink};
 use log::{debug, error, info};
 use nix::mount::{self, MntFlags, MsFlags};
@@ -22,7 +21,13 @@ use std::sync::Arc;
 use utilities::Cast;
 use walkdir::WalkDir;
 
-use super::csi::*;
+use super::csi::{
+    CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest, CreateVolumeResponse,
+    ListSnapshotsResponse, ListSnapshotsResponse_Entry, ListVolumesResponse_Entry, Snapshot,
+    Topology, TopologyRequirement, Volume, VolumeCapability_AccessMode_Mode, VolumeContentSource,
+    VolumeContentSource_SnapshotSource, VolumeContentSource_VolumeSource,
+    VolumeContentSource_oneof_type,
+};
 use super::datenlord_worker_grpc::WorkerClient;
 use util::RunAsRole;
 
@@ -31,7 +36,14 @@ const BIND_MOUNTER: &str = "target/debug/bind_mounter";
 
 /// Utility functions and const variables
 pub mod util {
-    use super::*;
+    use super::{
+        anyhow, debug, error, fs, info, mount, unistd, Cast, Command, Context,
+        CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest, CreateVolumeResponse,
+        DatenLordSnapshot, Debug, DeserializeOwned, ListSnapshotsResponse,
+        ListSnapshotsResponse_Entry, MntFlags, Path, RepeatedField, RpcContext, RpcStatus,
+        RpcStatusCode, Snapshot, Topology, UnarySink, Volume, WalkDir, BIND_MOUNTER,
+    };
+    use futures::prelude::*;
 
     /// The CSI plugin name
     pub const CSI_PLUGIN_NAME: &str = "io.datenlord.csi.plugin";
@@ -606,10 +618,6 @@ impl MetaData {
 
     /// Get snapshot by ID
     pub fn get_snapshot_by_id(&self, snap_id: &str) -> anyhow::Result<DatenLordSnapshot> {
-        // match self.snapshot_meta_data.read().unwrap().get(snap_id) {
-        //     Some(snap) => Some(Arc::<DatenLordSnapshot>::clone(snap)),
-        //     None => None,
-        // }
         smol::run(async move {
             self.get_at_most_one_value_from_etcd(&format!("{}/{}", SNAPSHOT_ID_PREFIX, snap_id))
                 .await
@@ -618,16 +626,6 @@ impl MetaData {
 
     /// Find snapshot by name
     pub fn get_snapshot_by_name(&self, snap_name: &str) -> anyhow::Result<DatenLordSnapshot> {
-        // match self
-        //     .snapshot_meta_data
-        //     .read()
-        //     .unwrap()
-        //     .iter()
-        //     .find(|(_key, snapshot)| snapshot.snap_name == snap_name)
-        // {
-        //     Some(pair) => Some(Arc::<DatenLordSnapshot>::clone(pair.1)),
-        //     None => None,
-        // }
         let snap_name_key = format!("{}/{}", SNAPSHOT_NAME_PREFIX, snap_name);
         let snap_id: String =
             smol::run(async move { self.get_at_most_one_value_from_etcd(&snap_name_key).await })?;
@@ -643,16 +641,6 @@ impl MetaData {
         &self,
         src_volume_id: &str,
     ) -> anyhow::Result<DatenLordSnapshot> {
-        // match self
-        //     .snapshot_meta_data
-        //     .read()
-        //     .unwrap()
-        //     .iter()
-        //     .find(|(_key, val)| val.vol_id == src_volume_id)
-        // {
-        //     Some(pair) => Some(Arc::<DatenLordSnapshot>::clone(pair.1)),
-        //     None => None,
-        // }
         let src_vol_id_key = format!("{}/{}", SNAPSHOT_SOURCE_ID_PREFIX, src_volume_id);
         let snap_id: String =
             smol::run(async move { self.get_at_most_one_value_from_etcd(&src_vol_id_key).await })?;
@@ -776,9 +764,7 @@ impl MetaData {
             self.get_list_from_etcd(&format!("{}/", VOLUME_ID_PREFIX))
                 .await
         })?;
-        // self.volume_meta_data
-        //     .read()
-        //     .unwrap()
+
         let result_list = Self::list_helper(vol_list, starting_token, max_entries, |vol| {
             let mut entry = ListVolumesResponse_Entry::new();
             entry.mut_volume().set_capacity_bytes(vol.get_size());
@@ -812,10 +798,7 @@ impl MetaData {
             self.get_list_from_etcd(&format!("{}/", SNAPSHOT_ID_PREFIX))
                 .await
         })?;
-        // self
-        //     .snapshot_meta_data
-        //     .read()
-        //     .unwrap()
+
         let result_list = Self::list_helper(snap_list, starting_token, max_entries, |snap| {
             let mut entry = ListSnapshotsResponse_Entry::new();
             entry.mut_snapshot().set_size_bytes(snap.size_bytes);
@@ -838,16 +821,11 @@ impl MetaData {
 
     /// Find volume by ID
     pub fn find_volume_by_id(&self, vol_id: &str) -> bool {
-        // self.volume_meta_data.read().unwrap().contains_key(vol_id)
         self.get_volume_by_id(vol_id).is_ok()
     }
 
     /// Get volume by ID
     pub fn get_volume_by_id(&self, vol_id: &str) -> anyhow::Result<DatenLordVolume> {
-        // match self.volume_meta_data.read().unwrap().get(vol_id) {
-        //     Some(vol) => Some(Arc::<DatenLordVolume>::clone(vol)),
-        //     None => None,
-        // }
         smol::run(async move {
             self.get_at_most_one_value_from_etcd(&format!("{}/{}", VOLUME_ID_PREFIX, vol_id))
                 .await
@@ -856,16 +834,6 @@ impl MetaData {
 
     /// Get volume by name
     pub fn get_volume_by_name(&self, vol_name: &str) -> anyhow::Result<DatenLordVolume> {
-        // match self
-        //     .volume_meta_data
-        //     .read()
-        //     .unwrap()
-        //     .iter()
-        //     .find(|(_key, val)| val.vol_name == vol_name)
-        // {
-        //     Some(pair) => Some(Arc::<DatenLordVolume>::clone(pair.1)),
-        //     None => None,
-        // }
         let vol_name_key = format!("{}/{}", VOLUME_NAME_PREFIX, vol_name);
         let vol_id: String =
             smol::run(async move { self.get_at_most_one_value_from_etcd(&vol_name_key).await })?;
@@ -933,16 +901,6 @@ impl MetaData {
     /// Delete the snapshot meta data
     pub fn delete_snapshot_meta_data(&self, snap_id: &str) -> anyhow::Result<DatenLordSnapshot> {
         info!("deleting the meta data of snapshot ID={}", snap_id);
-
-        // let res = self.snapshot_meta_data.write().unwrap().remove(snap_id);
-        // match res {
-        //     Some(snap) => Some(snap),
-        //     // For idempotency, repeated deletion return no error
-        //     None => {
-        //         error!("failed to find snapshot ID={} to delete", snap_id);
-        //         None
-        //     }
-        // }
 
         // TODO: use etcd transancation?
         let snap_id_key = format!("{}/{}", SNAPSHOT_ID_PREFIX, snap_id);
@@ -1075,15 +1033,6 @@ impl MetaData {
     /// Delete the volume meta data
     pub fn delete_volume_meta_data(&self, vol_id: &str) -> anyhow::Result<DatenLordVolume> {
         info!("deleting volume ID={}", vol_id);
-
-        // let res = self.volume_meta_data.write().unwrap().remove(vol_id);
-        // if let Some(vol) = res {
-        //     Some(vol)
-        // } else {
-        //     // For idempotency, repeated deletion return no error
-        //     error!("failed to find volume ID={} to delete", vol_id);
-        //     None
-        // }
 
         // TODO: use etcd transancation?
         let vol_id_key = format!("{}/{}", VOLUME_ID_PREFIX, vol_id);
@@ -1300,7 +1249,7 @@ impl MetaData {
         (RpcStatusCode::OK, "".to_owned())
     }
 
-    /// Delete one bind path of a volume from etcd
+    /// Delete one bind path of a volume from etcd,
     /// return all bind paths before deletion
     pub fn delete_volume_one_bind_mount_path(
         &self,
@@ -1417,30 +1366,6 @@ impl MetaData {
                 target_path, vol_id, e,
             );
         }
-        // match volume_mount_path_pre_value {
-        //     Ok(pre_value) => {
-        //         if let Some(pre_mount_path) = pre_value {
-        //             if pre_mount_path == target_path {
-        //                 warn!(
-        //                     "the volume has been mount to {}, \
-        //                         and this time mount to the same path again {}",
-        //                     pre_mount_path, target_path,
-        //                 );
-        //             } else {
-        //                 panic!(
-        //                     "the volume has been mount to {}, \
-        //                         and this time re-mount to {}",
-        //                     pre_mount_path, target_path,
-        //                 );
-        //             }
-        //         }
-        //     }
-        //     Err(e) => panic!(
-        //         "failed to write the mount path={} of volume ID={} to etcd, \
-        //             the error is: {}",
-        //         target_path, vol_id, e,
-        //     ),
-        // }
     }
 
     /// Bind mount volume directory to target path if root

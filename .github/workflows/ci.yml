@@ -195,8 +195,18 @@ jobs:
           kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
           kubectl apply -f csiplugin_k8s.yaml
           kubectl get csidriver
+          kubectl get csinode
+          kubectl get storageclass
+          kubectl get volumesnapshotclass
           kubectl wait --for=condition=Ready pod -l app=csi-controller-datenlord -n csi-datenlord --timeout=60s
           kubectl wait --for=condition=Ready pod -l app=csi-nodeplugin-datenlord -n csi-datenlord --timeout=60s
+          wget https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml
+          wget https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml
+          sed -e 's/namespace\:\ default/namespace\:\ csi\-datenlord/g' setup-snapshot-controller.yaml > datenlord-setup-snapshot-controller.yaml
+          sed -e 's/namespace\:\ default/namespace\:\ csi\-datenlord/g' rbac-snapshot-controller.yaml > datenlord-rbac-snapshot-controller.yaml
+          kubectl apply -f datenlord-rbac-snapshot-controller.yaml
+          kubectl apply -f datenlord-setup-snapshot-controller.yaml
+          kubectl wait --for=condition=Ready pod -l app=snapshot-controller -n csi-datenlord --timeout=60s
           kubectl get pods -A -o wide
           sudo netstat -lntp & ls -lsh
       - name: E2E Test
