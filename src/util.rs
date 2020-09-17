@@ -37,8 +37,9 @@ pub const DEFAULT_PORT: u16 = 50051;
 /// Max storage capacity per volume,
 /// Default 20GB required by csi-sanity check
 pub const MAX_VOLUME_STORAGE_CAPACITY: i64 = 20 * 1024 * 1024 * 1024;
-/// Default ephemeral volume storage capacity
-pub const EPHEMERAL_VOLUME_STORAGE_CAPACITY: i64 = MAX_VOLUME_STORAGE_CAPACITY / 10;
+/// Default ephemeral volume storage capacity,
+/// Default same as max storage capacity per volume 20GB
+pub const EPHEMERAL_VOLUME_STORAGE_CAPACITY: i64 = MAX_VOLUME_STORAGE_CAPACITY;
 /// Extension with which snapshot files will be saved.
 pub const SNAPSHOT_EXT: &str = ".snap";
 /// The key to the topology hashmap
@@ -46,7 +47,7 @@ pub const TOPOLOGY_KEY_NODE: &str = "topology.csi.datenlord.io/node";
 /// The key of ephemeral in volume context
 pub const EPHEMERAL_KEY_CONTEXT: &str = "csi.storage.k8s.io/ephemeral";
 /// Default max volume per node, should read from input argument
-pub const MAX_VOLUMES_PER_NODE: i64 = 256;
+pub const MAX_VOLUMES_PER_NODE: i32 = 256;
 /// Default node name, should read from input argument
 pub const DEFAULT_NODE_NAME: &str = "localhost"; // TODO: to remove
 /// The socket file to be binded by worker service

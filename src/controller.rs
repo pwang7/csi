@@ -1,7 +1,7 @@
 //! The implementation for CSI controller service
 
 use anyhow::{self, Context};
-use grpcio::{Error, RpcContext, RpcStatusCode, UnarySink};
+use grpcio::{RpcContext, RpcStatusCode, UnarySink};
 use log::{debug, error, info, warn};
 use protobuf::RepeatedField;
 use std::cmp::Ordering;
@@ -258,6 +258,61 @@ impl ControllerImpl {
         resp.set_entries(RepeatedField::from_vec(vec![entry]));
         Ok(resp)
     }
+
+    /// Call worker create volume
+    fn worker_create_volume(
+        &self,
+        req: &CreateVolumeRequest,
+    ) -> Result<CreateVolumeResponse, (RpcStatusCode, String)> {
+        let topology_requirement = if req.has_accessibility_requirements() {
+            Some(req.get_accessibility_requirements())
+        } else {
+            None
+        };
+        let worker_node = match self.meta_data.select_node(topology_requirement) {
+            Ok(n) => n,
+            Err(e) => {
+                error!("failed to select a node, the error is: {}", e);
+                return Err((
+                    RpcStatusCode::INTERNAL,
+                    format!("failed to select a node, the error is: {}", e,),
+                ));
+            }
+        };
+        let client = self.meta_data.build_worker_client(&worker_node.node_id);
+        let create_res = client.worker_create_volume(req);
+        match create_res {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                let (rsc, msg) = match err {
+                    grpcio::Error::RpcFailure(s) => (
+                        s.status,
+                        if let Some(m) = s.details {
+                            m
+                        } else {
+                            format!(
+                                "failed to create volume by worker at {}",
+                                worker_node.node_id,
+                            )
+                        },
+                    ),
+                    e @ grpcio::Error::Codec(..)
+                    | e @ grpcio::Error::CallFailure(..)
+                    | e @ grpcio::Error::RpcFinished(..)
+                    | e @ grpcio::Error::RemoteStopped
+                    | e @ grpcio::Error::ShutdownFailed
+                    | e @ grpcio::Error::BindFail(..)
+                    | e @ grpcio::Error::QueueShutdown
+                    | e @ grpcio::Error::GoogleAuthenticationFailed
+                    | e @ grpcio::Error::InvalidMetadata(..) => (
+                        RpcStatusCode::INTERNAL,
+                        format!("failed to create volume, the error is: {}", e),
+                    ),
+                };
+                Err((rsc, msg))
+            }
+        }
+    }
 }
 
 impl Controller for ControllerImpl {
@@ -355,54 +410,16 @@ impl Controller for ControllerImpl {
             return util::fail(&ctx, sink, rpc_status_code, err_msg);
         }
 
-        let topology_requirement = if req.has_accessibility_requirements() {
-            Some(req.get_accessibility_requirements())
-        } else {
-            None
-        };
-        let worker_node = match self.meta_data.select_node(topology_requirement) {
-            Ok(n) => n,
-            Err(e) => {
-                error!("failed to select a node, the error is: {}", e);
-                return util::fail(
-                    &ctx,
-                    sink,
-                    RpcStatusCode::INTERNAL,
-                    format!("failed to select a node, the error is: {}", e,),
+        match self.worker_create_volume(&req) {
+            Ok(resp) => util::success(&ctx, sink, resp),
+            Err((rpc_status_code, err_msg)) => {
+                debug_assert_ne!(
+                    rpc_status_code,
+                    RpcStatusCode::OK,
+                    "the RpcStatusCode should not be OK when error",
                 );
-            }
-        };
-        let client = self.meta_data.build_worker_client(&worker_node.node_id);
-        let create_res = client.worker_create_volume(&req);
-        match create_res {
-            Ok(r) => util::success(&ctx, sink, r),
-            Err(err) => {
-                let (rsc, msg) = match err {
-                    Error::RpcFailure(s) => (
-                        s.status,
-                        if let Some(m) = s.details {
-                            m
-                        } else {
-                            format!(
-                                "failed to create volume by worker at {}",
-                                worker_node.node_id,
-                            )
-                        },
-                    ),
-                    e @ grpcio::Error::Codec(..)
-                    | e @ grpcio::Error::CallFailure(..)
-                    | e @ grpcio::Error::RpcFinished(..)
-                    | e @ grpcio::Error::RemoteStopped
-                    | e @ grpcio::Error::ShutdownFailed
-                    | e @ grpcio::Error::BindFail(..)
-                    | e @ grpcio::Error::QueueShutdown
-                    | e @ grpcio::Error::GoogleAuthenticationFailed
-                    | e @ grpcio::Error::InvalidMetadata(..) => (
-                        RpcStatusCode::INTERNAL,
-                        format!("failed to create volume, the error is: {}", e),
-                    ),
-                };
-                util::fail(&ctx, sink, rsc, msg)
+                debug!("{}", err_msg);
+                util::fail(&ctx, sink, rpc_status_code, err_msg)
             }
         }
     }
@@ -573,20 +590,19 @@ impl Controller for ControllerImpl {
         let max_entries = req.get_max_entries();
         let starting_token = req.get_starting_token();
         let (vol_vec, next_pos) = match self.meta_data.list_volumes(starting_token, max_entries) {
-            Ok((rpc_status_code, err_msg, vol_vec, next_pos)) => {
-                if RpcStatusCode::OK == rpc_status_code {
-                    (vol_vec, next_pos)
-                } else {
-                    return util::fail(&ctx, sink, rpc_status_code, err_msg);
-                }
-            }
-            Err(e) => {
+            Ok((vol_vec, next_pos)) => (vol_vec, next_pos),
+            Err((rpc_status_code, err_msg)) => {
+                debug_assert_ne!(
+                    rpc_status_code,
+                    RpcStatusCode::OK,
+                    "the RpcStatusCode should not be OK when error",
+                );
                 warn!(
                     "failed to list volumes from starting position={} and \
                         max entries={}, the error is: {}",
-                    starting_token, max_entries, e,
+                    starting_token, max_entries, err_msg,
                 );
-                (Vec::new(), 0) // Empty result list, and next_pos
+                return util::fail(&ctx, sink, rpc_status_code, err_msg);
             }
         };
         let list_size = vol_vec.len();
@@ -832,20 +848,19 @@ impl Controller for ControllerImpl {
         let starting_token = req.get_starting_token();
         let (snap_vec, next_pos) = match self.meta_data.list_snapshots(starting_token, max_entries)
         {
-            Ok((rpc_status_code, err_msg, snap_vec, next_pos)) => {
-                if RpcStatusCode::OK == rpc_status_code {
-                    (snap_vec, next_pos)
-                } else {
-                    return util::fail(&ctx, sink, rpc_status_code, err_msg);
-                }
-            }
-            Err(e) => {
-                error!(
+            Ok((snap_vec, next_pos)) => (snap_vec, next_pos),
+            Err((rpc_status_code, err_msg)) => {
+                debug_assert_ne!(
+                    rpc_status_code,
+                    RpcStatusCode::OK,
+                    "the RpcStatusCode should not be OK when error",
+                );
+                warn!(
                     "failed to list snapshots from starting position={}, \
                         max entries={}, the error is: {}",
-                    starting_token, max_entries, e,
+                    starting_token, max_entries, err_msg,
                 );
-                (Vec::new(), 0) // Empty result list and next_pos
+                return util::fail(&ctx, sink, rpc_status_code, err_msg);
             }
         };
 

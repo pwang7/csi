@@ -22,7 +22,6 @@
     // unused_results, // TODO: fix unused results
     variant_size_differences,
 
-    // Treat warnings as errors
     warnings, // treat all wanings as errors
 
     clippy::all,
@@ -94,7 +93,7 @@ mod worker;
 use controller::ControllerImpl;
 use etcd_client::EtcdClient;
 use identity::IdentityImpl;
-use meta_data::MetaData;
+use meta_data::{DatenLordNode, MetaData};
 use node::NodeImpl;
 use util::RunAsRole;
 use worker::WorkerImpl;
@@ -127,42 +126,14 @@ fn build_grpc_servers(
     };
 
     let ephemeral = false; // TODO: read from command line argument
-    let md = MetaData::new(
+    let node = DatenLordNode::new(
         node_id,
-        data_dir,
         worker_port,
-        ephemeral,
-        util::MAX_VOLUMES_PER_NODE,
         util::MAX_VOLUME_STORAGE_CAPACITY,
-        run_as,
-        etcd_client,
-    )?;
+        util::MAX_VOLUMES_PER_NODE,
+    );
+    let md = MetaData::new(data_dir, ephemeral, run_as, etcd_client, node)?;
     let meta_data = Arc::new(md);
-    /*
-       let (controller_meta_data, node_worker_meta_data) = if let RunAsRole::Both = run_as {
-           let meta_data2 = MetaData::new(
-               util::CSI_PLUGIN_NAME.to_owned(),
-               node_id,
-               util::CSI_PLUGIN_VERSION.to_owned(),
-               data_dir,
-               worker_port,
-               ephemeral,
-               util::MAX_VOLUME_STORAGE_CAPACITY,
-               run_as,
-           );
-           // If run both controller and node together, then their meta data should be different
-           (Arc::new(meta_data1), Arc::new(meta_data2))
-       } else {
-           // If run controller and node seperately,
-           // actually only one role is in effect in a process,
-           // so shared meta data between controller and node in a process should be fine
-           let arc_meta_data = Arc::new(meta_data1);
-           (
-               Arc::<MetaData>::clone(&arc_meta_data),
-               Arc::<MetaData>::clone(&arc_meta_data),
-           )
-       };
-    */
     let identity_service = csi_grpc::create_identity(IdentityImpl::new(
         driver_name,
         util::CSI_PLUGIN_VERSION.to_owned(),
@@ -513,7 +484,7 @@ mod test {
         Ok(())
     }
 
-    fn test_meta_data() -> anyhow::Result<()> {
+    fn build_meta_data() -> anyhow::Result<MetaData> {
         let etcd_address_vec = get_etcd_address_vec();
         let etcd_client = EtcdClient::new(etcd_address_vec)?;
         clear_test_data(&etcd_client)?;
@@ -523,17 +494,17 @@ mod test {
         let data_dir = util::DATA_DIR;
         let run_as = RunAsRole::Both;
         let ephemeral = false;
-        let meta_data = MetaData::new(
+        let node = DatenLordNode::new(
             node_id.to_owned(),
-            data_dir.to_owned(),
             worker_port,
-            ephemeral,
-            util::MAX_VOLUMES_PER_NODE,
             util::MAX_VOLUME_STORAGE_CAPACITY,
-            run_as,
-            etcd_client,
-        )?;
+            util::MAX_VOLUMES_PER_NODE,
+        );
+        MetaData::new(data_dir.to_owned(), ephemeral, run_as, etcd_client, node)
+    }
 
+    fn test_meta_data() -> anyhow::Result<()> {
+        let meta_data = build_meta_data()?;
         let vol_id = "the-fake-ephemeral-volume-id-for-meta-data-test";
         let mut volume = meta_data::DatenLordVolume::build_ephemeral_volume(
             vol_id,
@@ -585,11 +556,10 @@ mod test {
             "test-snapshot-name".to_owned(), //snap_name,
             snap_id.to_owned(),              //snap_id,
             vol_id.to_owned(),
-            node_id.to_owned(),
+            meta_data.get_node_id().to_owned(),
             meta_data.get_snapshot_path(snap_id),
             std::time::SystemTime::now(),
-            0,    // size_bytes,
-            true, // ready_to_use,
+            0, // size_bytes,
         );
         let add_snap_res = meta_data.add_snapshot_meta_data(snap_id, &snapshot);
         assert!(
@@ -1449,7 +1419,7 @@ mod test {
         );
         assert_eq!(
             info_resp.get_max_volumes_per_node(),
-            util::MAX_VOLUMES_PER_NODE,
+            util::MAX_VOLUMES_PER_NODE.into(),
             "max volumes per node not match",
         );
         let topology = info_resp.get_accessible_topology();

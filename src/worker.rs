@@ -25,6 +25,72 @@ impl WorkerImpl {
     pub fn new(meta_data: Arc<MetaData>) -> Self {
         Self { meta_data }
     }
+    /// Build volume from either snapshot or another volume
+    fn build_volume_from_source(
+        &self,
+        vol_id: &str,
+        vol_name: &str,
+        vol_size: i64,
+        content_source: &VolumeSource,
+    ) -> (RpcStatusCode, String) {
+        match content_source {
+            VolumeSource::Snapshot(source_snapshot_id) => {
+                let (rpc_status_code, msg) = self.meta_data.copy_volume_from_snapshot(
+                    vol_size,
+                    source_snapshot_id,
+                    &vol_id.to_string(),
+                );
+                if RpcStatusCode::OK == rpc_status_code {
+                    info!(
+                        "successfully populated volume ID={} and name={} \
+                            from source snapshot ID={} on node ID={}",
+                        vol_id,
+                        vol_name,
+                        source_snapshot_id,
+                        self.meta_data.get_node_id(),
+                    );
+                    (RpcStatusCode::OK, "".to_owned())
+                } else {
+                    warn!(
+                        "failed to populate volume ID={} and name={} from source snapshot ID={}, \
+                            the error is: {}",
+                        vol_id, vol_name, source_snapshot_id, msg,
+                    );
+                    (rpc_status_code, msg)
+                }
+            }
+            VolumeSource::Volume(source_volume_id) => {
+                let (rpc_status_code, msg) = self.meta_data.copy_volume_from_volume(
+                    vol_size,
+                    source_volume_id,
+                    &vol_id.to_string(),
+                );
+                if let RpcStatusCode::OK = rpc_status_code {
+                    info!(
+                        "successfully populated volume ID={} and name={} \
+                            from source volume ID={} on node ID={}",
+                        vol_id,
+                        vol_name,
+                        source_volume_id,
+                        self.meta_data.get_node_id(),
+                    );
+                    (RpcStatusCode::OK, "".to_owned())
+                } else {
+                    warn!(
+                        "failed to populate volume ID={} and name={} \
+                            from source volume ID={} on node ID={} \
+                            the error is: {}",
+                        vol_id,
+                        vol_name,
+                        source_volume_id,
+                        self.meta_data.get_node_id(),
+                        msg,
+                    );
+                    (rpc_status_code, msg)
+                }
+            }
+        }
+    }
 }
 
 impl Worker for WorkerImpl {
@@ -65,64 +131,16 @@ impl Worker for WorkerImpl {
                 );
             }
         };
+
         if let Some(content_source) = &volume.content_source {
-            match content_source {
-                VolumeSource::Snapshot(source_snapshot_id) => {
-                    let (rpc_status_code, msg) = self.meta_data.copy_volume_from_snapshot(
-                        vol_size,
-                        source_snapshot_id,
-                        &vol_id.to_string(),
-                    );
-                    if RpcStatusCode::OK == rpc_status_code {
-                        info!(
-                            "successfully populated volume ID={} and name={} \
-                                from source snapshot ID={} on node ID={}",
-                            vol_id,
-                            vol_name,
-                            source_snapshot_id,
-                            self.meta_data.get_node_id(),
-                        );
-                    } else {
-                        warn!(
-                            "failed to populate volume ID={} and name={} from source snapshot ID={}, \
-                                the error is: {}",
-                            vol_id,
-                            vol_name,
-                            source_snapshot_id,
-                            msg,
-                        );
-                        return util::fail(&ctx, sink, rpc_status_code, msg);
-                    }
-                }
-                VolumeSource::Volume(source_volume_id) => {
-                    let (rpc_status_code, msg) = self.meta_data.copy_volume_from_volume(
-                        vol_size,
-                        source_volume_id,
-                        &vol_id.to_string(),
-                    );
-                    if let RpcStatusCode::OK = rpc_status_code {
-                        info!(
-                            "successfully populated volume ID={} and name={} \
-                                from source volume ID={} on node ID={}",
-                            vol_id,
-                            vol_name,
-                            source_volume_id,
-                            self.meta_data.get_node_id(),
-                        );
-                    } else {
-                        warn!(
-                            "failed to populate volume ID={} and name={} \
-                                from source volume ID={} on node ID={} \
-                                the error is: {}",
-                            vol_id,
-                            vol_name,
-                            source_volume_id,
-                            self.meta_data.get_node_id(),
-                            msg,
-                        );
-                        return util::fail(&ctx, sink, rpc_status_code, msg);
-                    }
-                }
+            let (rpc_status_code, err_msg) =
+                self.build_volume_from_source(&vol_id_str, vol_name, vol_size, content_source);
+            if RpcStatusCode::OK != rpc_status_code {
+                debug!(
+                    "failed to create volume from source, the error is: {}",
+                    err_msg,
+                );
+                return util::fail(&ctx, sink, rpc_status_code, err_msg);
             }
         }
 

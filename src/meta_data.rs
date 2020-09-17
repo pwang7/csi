@@ -32,17 +32,25 @@ pub struct DatenLordNode {
     pub worker_port: u16,
     /// Node available space for storage
     pub max_available_space_bytes: i64,
+    /// Max volumes per node
+    pub max_volumes_per_node: i32,
     // /// Node IP
     // pub ip_address: String, // TODO: add node IP address
 }
 
 impl DatenLordNode {
     /// Create `DatenLordNode`
-    const fn new(node_id: String, worker_port: u16, max_available_space_bytes: i64) -> Self {
+    pub const fn new(
+        node_id: String,
+        worker_port: u16,
+        max_available_space_bytes: i64,
+        max_volumes_per_node: i32,
+    ) -> Self {
         Self {
             node_id,
             worker_port,
             max_available_space_bytes,
+            max_volumes_per_node,
         }
     }
 }
@@ -53,9 +61,7 @@ pub struct MetaData {
     data_dir: String,
     /// The plugin will save data persistently or not
     ephemeral: bool,
-    /// Max volumes per node
-    max_volumes_per_node: i64,
-    /// The meta data service is for controller or node
+    /// The run as role, either controller or node
     run_as: RunAsRole,
     /// The list of etcd address and port
     etcd_client: EtcdClient,
@@ -93,20 +99,15 @@ const VOLUME_BIND_MOUNT_PATH_SEPARATOR: &str = "\n";
 impl MetaData {
     /// Create `MetaData`
     pub fn new(
-        node_id: String,
         data_dir: String,
-        worker_port: u16,
         ephemeral: bool,
-        max_volumes_per_node: i64,
-        max_available_space_bytes: i64,
         run_as: RunAsRole,
         etcd_client: EtcdClient,
+        node: DatenLordNode,
     ) -> anyhow::Result<Self> {
-        let node = DatenLordNode::new(node_id, worker_port, max_available_space_bytes);
         let md = Self {
             data_dir,
             ephemeral,
-            max_volumes_per_node,
             run_as,
             etcd_client,
             node,
@@ -212,130 +213,9 @@ impl MetaData {
     }
 
     /// Get max volumes per node
-    pub const fn get_max_volumes_per_node(&self) -> i64 {
-        self.max_volumes_per_node
+    pub const fn get_max_volumes_per_node(&self) -> i32 {
+        self.node.max_volumes_per_node
     }
-
-    // /// Get zero or one key-value pair from etcd
-    // async fn get_at_most_one_value_from_etcd<T: DeserializeOwned>(
-    //     &self,
-    //     key: &str,
-    // ) -> anyhow::Result<T> {
-    //     let mut value_list = self.get_list_from_etcd(key).await?;
-    //     debug_assert!(
-    //         value_list.len() <= 1,
-    //         "failed to get zero or one key={} from etcd, but get {} values",
-    //         key,
-    //         value_list.len(),
-    //     );
-    //     value_list
-    //         .pop()
-    //         .ok_or_else(|| anyhow!("failed to get one key-value pair where key={}", key))
-    // }
-
-    // /// Get key-value list from etcd
-    // async fn get_list_from_etcd<T: DeserializeOwned>(
-    //     &self,
-    //     prefix: &str,
-    // ) -> anyhow::Result<Vec<T>> {
-    //     let req = etcd_rs::RangeRequest::new(etcd_rs::KeyRange::prefix(prefix));
-    //     let mut resp = self.etcd_client.kv().range(req).await.map_err(|e| {
-    //         anyhow!("failed to get RangeResponse from etcd, the error is: {}", e)
-    //     })?;
-    //     let mut result_vec = Vec::with_capacity(resp.count());
-    //     for kv in resp.take_kvs() {
-    //         let decoded_value: T = util::decode_from_bytes(kv.value())?;
-    //         result_vec.push(decoded_value);
-    //     }
-    //     Ok(result_vec)
-    // }
-
-    // /// Update a existing key value pair to etcd
-    // async fn update_to_etcd<T: DeserializeOwned + Serialize + Clone + Debug + Send + Sync>(
-    //     &self,
-    //     key: &str,
-    //     value: &T,
-    // ) -> anyhow::Result<T> {
-    //     let write_res = self.write_to_etcd(key, value).await?;
-    //     if let Some(pre_value) = write_res {
-    //         Ok(pre_value)
-    //     } else {
-    //         panic!("failed to replace previous value, return nothing",);
-    //     }
-    // }
-
-    // /// Write a key value pair to etcd
-    // async fn write_to_etcd<T: DeserializeOwned + Serialize + Clone + Debug + Send + Sync>(
-    //     &self,
-    //     key: &str,
-    //     value: &T,
-    // ) -> anyhow::Result<Option<T>> {
-    //     let bin_value = bincode::serialize(value).map_err(|e| {
-    //         anyhow!(
-    //             "failed to encode {:?} to binary, the error is: {}",
-    //             value,
-    //             e,
-    //         )
-    //     })?;
-    //     let mut req = etcd_rs::PutRequest::new(key, bin_value);
-    //     req.set_prev_kv(true); // Return previous value
-    //     let mut resp = self.etcd_client.kv().put(req).await.map_err(|e| {
-    //         anyhow!("failed to get PutResponse from etcd, the error is: {}", e)
-    //     })?;
-    //     if let Some(pre_kv) = resp.take_prev_kv() {
-    //         let decoded_value: T = util::decode_from_bytes(pre_kv.value())?;
-    //         Ok(Some(decoded_value))
-    //     } else {
-    //         Ok(None)
-    //     }
-    // }
-
-    // /// Delete an existing key value pair from etcd
-    // async fn delete_one_value_from_etcd<T: DeserializeOwned + Clone + Debug + Send + Sync>(
-    //     &self,
-    //     key: &str,
-    // ) -> anyhow::Result<T> {
-    //     let delete_res = self.delete_from_etcd(key).await?;
-    //     if let Some(pre_value) = delete_res {
-    //         Ok(pre_value)
-    //     } else {
-    //         panic!("failed to delete exactly one value from etced, delete nothing")
-    //     }
-    // }
-
-    // /// Delete a key value pair or nothing from etcd
-    // async fn delete_from_etcd<T: DeserializeOwned + Clone + Debug + Send + Sync>(
-    //     &self,
-    //     key: &str,
-    // ) -> anyhow::Result<Option<T>> {
-    //     let mut req = etcd_rs::DeleteRequest::new(etcd_rs::KeyRange::key(key));
-    //     req.set_prev_kv(true);
-    //     let mut resp = self.etcd_client.kv().delete(req).await.map_err(|e| {
-    //         anyhow!(
-    //             "failed to get DeleteResponse from etcd, the error is: {}",
-    //             e,
-    //         )
-    //     })?;
-
-    //     if resp.has_prev_kvs() {
-    //         let deleted_value_list = resp.take_prev_kvs();
-    //         debug_assert_eq!(
-    //             deleted_value_list.len(),
-    //             1,
-    //             "delete {} key value pairs for a single key, impossible case",
-    //             deleted_value_list.len(),
-    //         );
-    //         let deleted_kv = if let Some(kv) = deleted_value_list.get(0) {
-    //             kv
-    //         } else {
-    //             panic!("failed to get the exactly one deleted key value pair")
-    //         };
-    //         let decoded_value: T = util::decode_from_bytes(deleted_kv.value())?;
-    //         Ok(Some(decoded_value))
-    //     } else {
-    //         Ok(None)
-    //     }
-    // }
 
     /// Get snapshot by ID
     pub fn get_snapshot_by_id(&self, snap_id: &str) -> Option<DatenLordSnapshot> {
@@ -405,35 +285,13 @@ impl MetaData {
         self.get_snapshot_by_id(&snap_id)
     }
 
-    // /// Get the number of snapshots
-    // pub fn get_num_of_volumes(&self) -> usize {
-    //     // self.volume_meta_data.read().unwrap().len()
-    //     let list_res: anyhow::Result<Vec<DatenLordVolume>> =
-    //         smol::run(async move { self.get_list_from_etcd(&format!("{}/", VOLUME_ID_PREFIX)).await });
-    //     match list_res {
-    //         Ok(v) => v.len(),
-    //         Err(e) => panic!("failed to get volumes, the error is: {}", e),
-    //     }
-    // }
-
-    // /// Get the number of snapshots
-    // pub fn get_num_of_snapshots(&self) -> usize {
-    //     // self.snapshot_meta_data.read().unwrap().len()
-    //     let list_res: anyhow::Result<Vec<DatenLordSnapshot>> =
-    //         smol::run(async move { self.get_list_from_etcd(&format!("{}/", SNAPSHOT_ID_PREFIX)).await });
-    //     match list_res {
-    //         Ok(v) => v.len(),
-    //         Err(e) => panic!("failed to get volumes, the error is: {}", e),
-    //     }
-    // }
-
     /// The helper function to list elements
     fn list_helper<E, T, F>(
         collection: impl Into<Vec<E>>,
         starting_token: &str,
         max_entries: i32,
         f: F,
-    ) -> (RpcStatusCode, String, Vec<T>, usize)
+    ) -> Result<(Vec<T>, usize), (RpcStatusCode, String)>
     where
         F: Fn(&E) -> Option<T>,
     {
@@ -444,24 +302,20 @@ impl MetaData {
         } else if let Ok(i) = starting_token.parse::<usize>() {
             i
         } else {
-            return (
+            return Err((
                 RpcStatusCode::ABORTED,
                 format!("invalid starting position {}", starting_token),
-                Vec::new(), // Empty result list
-                0,          // next_pos
-            );
+            ));
         };
         if starting_pos > 0 && starting_pos >= total_num {
-            return (
+            return Err((
                 RpcStatusCode::ABORTED,
                 format!(
                     "invalid starting token={}, larger than or equal to the list size={} of volumes",
                     starting_token,
                     total_num,
                 ),
-                Vec::new(), // Empty result list
-                0, // next_pos
-            );
+            ));
         }
         let (remaining, ofr) = total_num.overflowing_sub(starting_pos);
         debug_assert!(
@@ -505,7 +359,7 @@ impl MetaData {
                 f(elem)
             })
             .collect::<Vec<_>>();
-        (RpcStatusCode::OK, "".to_owned(), result_vec, next_pos)
+        Ok((result_vec, next_pos))
     }
 
     /// List volumes
@@ -513,12 +367,18 @@ impl MetaData {
         &self,
         starting_token: &str,
         max_entries: i32,
-    ) -> anyhow::Result<(RpcStatusCode, String, Vec<ListVolumesResponse_Entry>, usize)> {
+    ) -> Result<(Vec<ListVolumesResponse_Entry>, usize), (RpcStatusCode, String)> {
         let vol_list: Vec<DatenLordVolume> = self
             .etcd_client
-            .get_list(&format!("{}/", VOLUME_ID_PREFIX))?;
+            .get_list(&format!("{}/", VOLUME_ID_PREFIX))
+            .map_err(|e| {
+                (
+                    RpcStatusCode::INTERNAL,
+                    format!("failed to list volumes, the error is: {}", e),
+                )
+            })?;
 
-        let result_list = Self::list_helper(vol_list, starting_token, max_entries, |vol| {
+        Self::list_helper(vol_list, starting_token, max_entries, |vol| {
             let mut entry = ListVolumesResponse_Entry::new();
             entry.mut_volume().set_capacity_bytes(vol.get_size());
             entry.mut_volume().set_volume_id(vol.vol_id.clone());
@@ -532,8 +392,7 @@ impl MetaData {
             });
 
             Some(entry)
-        });
-        Ok(result_list)
+        })
     }
 
     /// List snapshots except those creation time failed to convert to proto timestamp
@@ -541,17 +400,18 @@ impl MetaData {
         &self,
         starting_token: &str,
         max_entries: i32,
-    ) -> anyhow::Result<(
-        RpcStatusCode,
-        String,
-        Vec<ListSnapshotsResponse_Entry>,
-        usize,
-    )> {
+    ) -> Result<(Vec<ListSnapshotsResponse_Entry>, usize), (RpcStatusCode, String)> {
         let snap_list: Vec<DatenLordSnapshot> = self
             .etcd_client
-            .get_list(&format!("{}/", SNAPSHOT_ID_PREFIX))?;
+            .get_list(&format!("{}/", SNAPSHOT_ID_PREFIX))
+            .map_err(|e| {
+                (
+                    RpcStatusCode::INTERNAL,
+                    format!("failed to list snapshots, the error is: {}", e),
+                )
+            })?;
 
-        let result_list = Self::list_helper(snap_list, starting_token, max_entries, |snap| {
+        Self::list_helper(snap_list, starting_token, max_entries, |snap| {
             let mut entry = ListSnapshotsResponse_Entry::new();
             entry.mut_snapshot().set_size_bytes(snap.size_bytes);
             entry.mut_snapshot().set_snapshot_id(snap.snap_id.clone());
@@ -567,8 +427,7 @@ impl MetaData {
             entry.mut_snapshot().set_ready_to_use(snap.ready_to_use);
 
             Some(entry)
-        });
-        Ok(result_list)
+        })
     }
 
     /// Find volume by ID
@@ -1181,74 +1040,6 @@ impl MetaData {
             fs_type,
             read_only,
         );
-        // let mut mnt_flags = MsFlags::MS_BIND;
-        // if read_only {
-        //     mnt_flags |= MsFlags::MS_RDONLY;
-        // }
-        // let mount_res = if unistd::geteuid().is_root() {
-        //     if let BindMountMode::Remount = bind_mount_mode {
-        //         mnt_flags |= MsFlags::MS_REMOUNT;
-        //     }
-        //     mount::mount::<Path, Path, OsStr, OsStr>(
-        //         Some(&vol_path),
-        //         target_dir,
-        //         if fs_type.is_empty() {
-        //             None
-        //         } else {
-        //             Some(OsStr::new(fs_type))
-        //         },
-        //         mnt_flags,
-        //         if mount_options.is_empty() {
-        //             None
-        //         } else {
-        //             Some(OsStr::new(&mount_options))
-        //         },
-        //     )
-        //     .context(format!(
-        //         "failed to direct mount {:?} to {:?}",
-        //         vol_path, target_dir
-        //     ))
-        // } else {
-        //     let mut mount_cmd = Command::new(util::BIND_MOUNTER);
-        //     mount_cmd
-        //         .arg("-f")
-        //         .arg(&vol_path)
-        //         .arg("-t")
-        //         .arg(&target_dir);
-        //     if read_only {
-        //         mount_cmd.arg("-r");
-        //     }
-        //     if let BindMountMode::Remount = bind_mount_mode {
-        //         mount_cmd.arg("-m");
-        //     }
-        //     if !fs_type.is_empty() {
-        //         mount_cmd.arg("-s").arg(&fs_type);
-        //     }
-        //     if !mount_options.is_empty() {
-        //         mount_cmd.arg("-o").arg(&mount_options);
-        //     }
-        //     let mount_handle = match mount_cmd.output() {
-        //         Ok(h) => h,
-        //         Err(e) => {
-        //             return (
-        //                 RpcStatusCode::INTERNAL,
-        //                 format!("bind_mounter command failed to start, the error is: {}", e),
-        //             )
-        //         }
-        //     };
-        //     if mount_handle.status.success() {
-        //         Ok(())
-        //     } else {
-        //         let stderr = String::from_utf8_lossy(&mount_handle.stderr);
-        //         debug!("bind_mounter failed to mount, the error is: {}", &stderr);
-        //         Err(anyhow!(
-        //             "bind_mounter failed to mount {:?} to {:?}, the error is: {}",
-        //             vol_path,
-        //             target_dir,
-        //             stderr,
-        //         ))
-        //     }
-        // };
         if let Err(bind_err) = mount_res {
             if ephemeral {
                 match self.delete_volume_meta_data(vol_id) {
@@ -1371,7 +1162,6 @@ impl MetaData {
                     snap_path,
                     now,
                     src_vol.get_size(),
-                    true, // ready_to_use
                 );
 
                 Ok(snapshot)
@@ -1503,22 +1293,46 @@ pub struct DatenLordVolume {
     pub ephemeral: bool,
 }
 
+/// The basic fields of a volume
+struct DatenLordVolumeBasicFields {
+    /// Volume name
+    pub vol_name: String,
+    /// Volume ID
+    pub vol_id: String,
+    /// Volume size in bytes
+    pub size_bytes: i64,
+    /// The ID of the node the volume stored at
+    pub node_id: String,
+    /// The volume diretory path
+    pub vol_path: PathBuf,
+    /// The volume is ephemeral or not
+    pub ephemeral: bool,
+}
+
 impl DatenLordVolume {
     /// Create volume helper
     fn new(
-        vol_id: String,
-        vol_name: String,
-        vol_size: i64,
-        node_id: String,
-        vol_path: PathBuf,
+        basic_fields: DatenLordVolumeBasicFields,
+        // vol_id: String,
+        // vol_name: String,
+        // vol_size: i64,
+        // node_id: String,
+        // vol_path: PathBuf,
         vol_access_mode: impl Into<Vec<VolumeCapability_AccessMode_Mode>>,
         content_source: Option<VolumeContentSource_oneof_type>,
-        ephemeral: bool,
+        // ephemeral: bool,
     ) -> anyhow::Result<Self> {
-        assert!(!vol_id.is_empty(), "volume ID cannot be empty");
-        assert!(!vol_name.is_empty(), "volume name cannot be empty");
-        assert!(!node_id.is_empty(), "node ID cannot be empty");
-        assert!(vol_size >= 0, "invalid volume size: {}", vol_size);
+        assert!(!basic_fields.vol_id.is_empty(), "volume ID cannot be empty");
+        assert!(
+            !basic_fields.vol_name.is_empty(),
+            "volume name cannot be empty"
+        );
+        assert!(!basic_fields.node_id.is_empty(), "node ID cannot be empty");
+        assert!(
+            basic_fields.size_bytes >= 0,
+            "invalid volume size: {}",
+            basic_fields.size_bytes
+        );
         let vol_access_mode_vec = vol_access_mode.into();
         let converted_vol_access_mode_vec = vol_access_mode_vec
             .into_iter()
@@ -1530,17 +1344,17 @@ impl DatenLordVolume {
             None
         };
         let vol = Self {
-            vol_id,
-            vol_name,
-            size_bytes: vol_size,
-            node_id,
-            vol_path,
+            vol_id: basic_fields.vol_id,
+            vol_name: basic_fields.vol_name,
+            size_bytes: basic_fields.size_bytes,
+            node_id: basic_fields.node_id,
+            vol_path: basic_fields.vol_path,
             vol_access_mode: converted_vol_access_mode_vec,
             content_source: vol_source,
-            ephemeral,
+            ephemeral: basic_fields.ephemeral,
         };
 
-        if ephemeral {
+        if basic_fields.ephemeral {
             debug_assert!(
                 vol.content_source.is_none(),
                 "ephemeral volume cannot have content source",
@@ -1559,14 +1373,16 @@ impl DatenLordVolume {
         vol_path: &Path,
     ) -> anyhow::Result<Self> {
         Self::new(
-            vol_id.to_owned(),
-            vol_name.to_owned(),
-            util::EPHEMERAL_VOLUME_STORAGE_CAPACITY,
-            node_id.to_owned(),
-            vol_path.to_owned(),
+            DatenLordVolumeBasicFields {
+                vol_id: vol_id.to_owned(),
+                vol_name: vol_name.to_owned(),
+                size_bytes: util::EPHEMERAL_VOLUME_STORAGE_CAPACITY,
+                node_id: node_id.to_owned(),
+                vol_path: vol_path.to_owned(),
+                ephemeral: true, // ephemeral
+            },
             [VolumeCapability_AccessMode_Mode::SINGLE_NODE_WRITER],
             None, // content source
-            true, // ephemeral
         )
     }
 
@@ -1578,11 +1394,14 @@ impl DatenLordVolume {
         vol_path: &Path,
     ) -> anyhow::Result<Self> {
         Self::new(
-            vol_id.to_owned(),
-            req.get_name().to_owned(),
-            req.get_capacity_range().get_required_bytes(),
-            node_id.to_owned(),
-            vol_path.to_owned(),
+            DatenLordVolumeBasicFields {
+                vol_id: vol_id.to_owned(),
+                vol_name: req.get_name().to_owned(),
+                size_bytes: req.get_capacity_range().get_required_bytes(),
+                node_id: node_id.to_owned(),
+                vol_path: vol_path.to_owned(),
+                ephemeral: false,
+            },
             req.get_volume_capabilities()
                 .iter()
                 .map(|vc| vc.get_access_mode().get_mode())
@@ -1592,7 +1411,6 @@ impl DatenLordVolume {
             } else {
                 None
             },
-            false, // ephemeral
         )
     }
 
@@ -1631,20 +1449,7 @@ impl DatenLordVolume {
     }
 }
 
-// impl Drop for DatenLordVolume {
-//     fn drop(&mut self) {
-//         let res = self.delete();
-//         if let Err(e) = res {
-//             error!(
-//                 "failed to delete volume ID={} and name={} in DatenLordVolume::drop(), \
-//                     the error is: {}",
-//                 self.vol_id, self.vol_name, e,
-//             );
-//         }
-//     }
-// }
-
-/// Snapshot corresponding to a volume
+/// Snapshot
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DatenLordSnapshot {
     /// Snapshot name
@@ -1675,7 +1480,6 @@ impl DatenLordSnapshot {
         snap_path: PathBuf,
         creation_time: std::time::SystemTime,
         size_bytes: i64,
-        ready_to_use: bool,
     ) -> Self {
         assert!(!snap_id.is_empty(), "snapshot ID cannot be empty");
         assert!(!snap_name.is_empty(), "snapshot name cannot be empty");
@@ -1690,7 +1494,7 @@ impl DatenLordSnapshot {
             snap_path,
             creation_time,
             size_bytes,
-            ready_to_use,
+            ready_to_use: true, // TODO: check whether the snapshot is ready to use or not
         }
     }
 
@@ -1703,15 +1507,3 @@ impl DatenLordSnapshot {
         Ok(())
     }
 }
-
-// impl Drop for DatenLordSnapshot {
-//     fn drop(&mut self) {
-//         let res = self.delete();
-//         if let Err(e) = res {
-//             error!(
-//                 "failed to delete snapshot ID={} and name={}, the error is: {}",
-//                 self.snap_id, self.snap_name, e,
-//             );
-//         }
-//     }
-// }

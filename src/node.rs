@@ -51,6 +51,79 @@ impl NodeImpl {
                 .iter()
                 .any(|cap| cap.get_rpc().get_field_type() == rpc_type)
     }
+
+    /// Create ephemeral volume
+    fn create_ephemeral_volume(&self, vol_id: &str) -> (RpcStatusCode, String) {
+        let vol_name = format!("ephemeral-{}", vol_id);
+        let vol_res = DatenLordVolume::build_ephemeral_volume(
+            vol_id,
+            &vol_name,
+            self.meta_data.get_node_id(),
+            &self.meta_data.get_volume_path(vol_id),
+        );
+        let volume = match vol_res {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    RpcStatusCode::INTERNAL,
+                    format!(
+                        "failed to create ephemeral volume ID={} and name={}, the errir is: {}",
+                        vol_id, vol_name, e
+                    ),
+                );
+            }
+        };
+        info!(
+            "ephemeral mode: created volume ID={} and name={}",
+            volume.vol_id, volume.vol_name,
+        );
+        let add_ephemeral_res = self.meta_data.add_volume_meta_data(vol_id, &volume);
+        debug_assert!(
+            add_ephemeral_res.is_ok(),
+            format!(
+                "ephemeral volume ID={} and name={} is duplicated",
+                vol_id, vol_name,
+            )
+        );
+        (RpcStatusCode::OK, "".to_owned())
+    }
+
+    /// Delete ephemeral volume
+    /// `tolerant_error` means whether to ignore umount error or not
+    fn delete_ephemeral_volume(&self, volume: &DatenLordVolume, tolerant_error: bool) {
+        let delete_ephemeral_res = self.meta_data.delete_volume_meta_data(&volume.vol_id);
+        if let Err(e) = delete_ephemeral_res {
+            if tolerant_error {
+                error!(
+                    "failed to delete ephemeral volume ID={} and name={}, \
+                        the error is: {}",
+                    volume.vol_id, volume.vol_name, e,
+                );
+            } else {
+                panic!(
+                    "failed to delete ephemeral volume ID={} and name={}, \
+                        the error is: {}",
+                    volume.vol_id, volume.vol_name, e,
+                );
+            }
+        }
+        let delete_dir_res = volume.delete_directory();
+        if let Err(e) = delete_dir_res {
+            if tolerant_error {
+                error!(
+                    "failed to delete the directory of ephemerial volume ID={}, \
+                        the error is: {}",
+                    volume.vol_id, e,
+                );
+            } else {
+                panic!(
+                    "failed to delete the directory of ephemerial volume ID={}, \
+                        the error is: {}",
+                    volume.vol_id, e,
+                );
+            }
+        }
+    }
 }
 
 impl Node for NodeImpl {
@@ -199,39 +272,10 @@ impl Node for NodeImpl {
 
         // If ephemeral is true, create volume here to avoid errors if not exists
         if ephemeral && !self.meta_data.find_volume_by_id(vol_id) {
-            let vol_name = format!("ephemeral-{}", vol_id);
-            let vol_res = DatenLordVolume::build_ephemeral_volume(
-                vol_id,
-                &vol_name,
-                self.meta_data.get_node_id(),
-                &self.meta_data.get_volume_path(vol_id),
-            );
-            let volume = match vol_res {
-                Ok(v) => v,
-                Err(e) => {
-                    return util::fail(
-                        &ctx,
-                        sink,
-                        RpcStatusCode::INTERNAL,
-                        format!(
-                            "failed to create ephemeral volume ID={} and name={}, the errir is: {}",
-                            vol_id, vol_name, e
-                        ),
-                    );
-                }
-            };
-            info!(
-                "ephemeral mode: created volume ID={} and name={}",
-                volume.vol_id, volume.vol_name,
-            );
-            let add_ephemeral_res = self.meta_data.add_volume_meta_data(vol_id, &volume);
-            debug_assert!(
-                add_ephemeral_res.is_ok(),
-                format!(
-                    "ephemeral volume ID={} and name={} is duplicated",
-                    vol_id, vol_name,
-                )
-            );
+            let (rpc_status_code, err_msg) = self.create_ephemeral_volume(vol_id);
+            if RpcStatusCode::OK != rpc_status_code {
+                return util::fail(&ctx, sink, RpcStatusCode::INTERNAL, err_msg);
+            }
         }
 
         match &req.get_volume_capability().access_type {
@@ -348,12 +392,16 @@ impl Node for NodeImpl {
         let remove_res = pre_mount_path_set.remove(target_path);
         let tolerant_error = if remove_res {
             debug!("the target path to un-mount found in etcd");
+            // Do not tolerant umount error,
+            // since the target path is one of the mount paths of this volume
             false
         } else {
             warn!(
                 "the target path={} to un-mount not found in etcd",
                 target_path
             );
+            // Tolerant umount error,
+            // since the target path is not one of the mount paths of this volume
             true
         };
         if let Err(e) = util::umount_volume_bind_path(target_path) {
@@ -384,38 +432,7 @@ impl Node for NodeImpl {
         // Delete ephemeral volume if no more bind mount
         // Does not return error when delete failure, repeated calls OK for idempotency
         if volume.ephemeral && pre_mount_path_set.is_empty() {
-            let delete_ephemeral_res = self.meta_data.delete_volume_meta_data(vol_id);
-            if let Err(e) = delete_ephemeral_res {
-                if tolerant_error {
-                    error!(
-                        "failed to delete ephemeral volume ID={} and name={}, \
-                            the error is: {}",
-                        vol_id, volume.vol_name, e,
-                    );
-                } else {
-                    panic!(
-                        "failed to delete ephemeral volume ID={} and name={}, \
-                            the error is: {}",
-                        vol_id, volume.vol_name, e,
-                    );
-                }
-            }
-            let delete_dir_res = volume.delete_directory();
-            if let Err(e) = delete_dir_res {
-                if tolerant_error {
-                    error!(
-                        "failed to delete the directory of ephemerial volume ID={}, \
-                            the error is: {}",
-                        volume.vol_id, e,
-                    );
-                } else {
-                    panic!(
-                        "failed to delete the directory of ephemerial volume ID={}, \
-                            the error is: {}",
-                        volume.vol_id, e,
-                    );
-                }
-            }
+            self.delete_ephemeral_volume(&volume, tolerant_error);
         }
         util::success(&ctx, sink, r)
     }
@@ -544,7 +561,7 @@ impl Node for NodeImpl {
 
         let mut r = NodeGetInfoResponse::new();
         r.set_node_id(self.meta_data.get_node_id().to_owned());
-        r.set_max_volumes_per_node(self.meta_data.get_max_volumes_per_node());
+        r.set_max_volumes_per_node(self.meta_data.get_max_volumes_per_node().into());
         r.set_accessible_topology(topology);
 
         util::success(&ctx, sink, r)
