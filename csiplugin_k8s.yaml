@@ -205,7 +205,7 @@ spec:
               add: ["SYS_ADMIN"]
             allowPrivilegeEscalation: true
           image: datenlord/csiplugin:latest
-          imagePullPolicy: "Always" # TODO: Change to IfNotPresent when release
+          imagePullPolicy: "IfNotPresent"
           args :
             - "--endpoint=$(CSI_NODE_ENDPOINT)"
             - "--drivername=csi.datenlord.io"
@@ -354,7 +354,7 @@ spec:
             # created by privileged CSI driver container.
             privileged: true
           image: datenlord/csiplugin:latest
-          imagePullPolicy: "Always" # TODO: Change to IfNotPresent when release
+          imagePullPolicy: "IfNotPresent"
           args :
             - "--endpoint=$(CSI_CONTROLLER_ENDPOINT)"
             - "--drivername=csi.datenlord.io"
