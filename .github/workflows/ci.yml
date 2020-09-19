@@ -160,7 +160,7 @@ jobs:
       #    while [[ $(kubectl get pods -l app=csi-controller-datenlord -A -o 'jsonpath={..status.conditions[?(@.type=="Ready")].status}') != "True" ]]; do kubectl get pods -A -o wide ; kubectl get nodes -o wide ; kubectl describe pod csi-controller-datenlord-0 -n csi-datenlord ; sleep 6 ; done
       #    while [[ $(kubectl get pods -l app=csi-nodeplugin-datenlord -A -o 'jsonpath={..status.conditions[?(@.type=="Ready")].status}') != "True" ]]; do kubectl get pods -A -o wide ; kubectl get nodes -o wide ; sleep 6 ; done
       #    kubectl get pods -A -o wide
-      #    sudo netstat -lntp & ls -lsh
+      #    sudo netstat -lntp && ls -lsh
       - name: Prepare Rust environment
         uses: actions-rs/toolchain@v1
         with:
@@ -208,7 +208,7 @@ jobs:
           kubectl apply -f datenlord-setup-snapshot-controller.yaml
           kubectl wait --for=condition=Ready pod -l app=snapshot-controller -n csi-datenlord --timeout=60s
           kubectl get pods -A -o wide
-          sudo netstat -lntp & ls -lsh
+          sudo netstat -lntp && ls -lsh
       - name: E2E Test
         run: |
           wget --quiet https://dl.k8s.io/v1.19.0/kubernetes-test-linux-amd64.tar.gz
