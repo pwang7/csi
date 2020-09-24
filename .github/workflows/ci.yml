@@ -320,9 +320,9 @@ jobs:
           export ETCD_END_POINT=http://127.0.0.1:2379
           target/debug/csi --endpoint=unix://$SOCKET_FILE --workerport=50051 --nodeid=localhost --drivername=io.datenlord.csi.plugin --datadir=/tmp/datenlord_data_dir --runas=both --etcd=$ETCD_END_POINT &
           ./csi-test/cmd/csi-sanity/csi-sanity -csi.endpoint=$SOCKET_FILE
-      #- name: Setup tmate session
-      #  if: ${{ always() }}
-      #  uses: mxschmitt/action-tmate@v3
+      - name: Setup tmate session
+        if: ${{ always() }}
+        uses: mxschmitt/action-tmate@v3
 
   fmt:
     name: Format
