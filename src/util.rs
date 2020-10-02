@@ -338,7 +338,9 @@ pub fn umount_volume_bind_path(target_dir: &str) -> anyhow::Result<()> {
                 stderr,
             ));
         }
-    } // csi-sanity requires plugin to remove the target mount directory
+    }
+
+    // csi-sanity requires plugin to remove the target mount directory
     fs::remove_dir_all(target_dir)
         .context(format!("failed to remove mount target path={}", target_dir))?;
 
