@@ -316,10 +316,12 @@ jobs:
       - name: Run csi plugin and csi-sanity test
         run: |
           export RUST_LOG=csi=debug
-          export SOCKET_FILE=/tmp/csi.sock
+          export CONTROLLER_SOCKET_FILE=/tmp/controller.sock
+          export NODE_SOCKET_FILE=/tmp/node.sock
           export ETCD_END_POINT=http://127.0.0.1:2379
-          target/debug/csi --endpoint=unix://$SOCKET_FILE --workerport=50051 --nodeid=localhost --drivername=io.datenlord.csi.plugin --datadir=/tmp/datenlord_data_dir --runas=both --etcd=$ETCD_END_POINT &
-          ./csi-test/cmd/csi-sanity/csi-sanity -csi.endpoint=$SOCKET_FILE
+          target/debug/csi --endpoint=unix://$NODE_SOCKET_FILE --workerport=0 --nodeid=localhost --drivername=io.datenlord.csi.plugin --datadir=/tmp/datenlord_data_dir --runas=node --etcd=$ETCD_END_POINT &
+          target/debug/csi --endpoint=unix://$CONTROLLER_SOCKET_FILE --workerport=0 --nodeid=localhost --drivername=io.datenlord.csi.plugin --datadir=/tmp/datenlord_data_dir --runas=controller --etcd=$ETCD_END_POINT &
+          ./csi-test/cmd/csi-sanity/csi-sanity -csi.endpoint=$NODE_SOCKET_FILE -csi.controllerendpoint=$CONTROLLER_SOCKET_FILE
       #- name: Setup tmate session
       #  if: ${{ always() }}
       #  uses: mxschmitt/action-tmate@v3

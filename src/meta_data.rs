@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Context};
 use grpcio::{ChannelBuilder, Environment, RpcStatusCode};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -138,17 +138,17 @@ impl MetaData {
     }
 
     /// Build `gRPC` client to `DatenLord` worker
-    pub fn build_worker_client(&self, node_id: &str) -> WorkerClient {
-        // let env = Arc::new(EnvBuilder::new().build());
+    pub fn build_worker_client(node: &DatenLordNode) -> WorkerClient {
+        // TODO: increase concurrent queue size
         let env = Arc::new(Environment::new(1));
-        let ch =
-            ChannelBuilder::new(env).connect(&format!("{}:{}", node_id, self.get_worker_port()));
+        let work_address = if node.worker_port == 0 {
+            util::LOCAL_WORKER_SOCKET.to_string()
+        } else {
+            format!("{}:{}", node.node_id, node.worker_port)
+        };
+        let ch = ChannelBuilder::new(env).connect(&work_address);
         let client = WorkerClient::new(ch);
-        debug!(
-            "build worker client to {}:{}",
-            node_id,
-            self.get_worker_port(),
-        );
+        debug!("build worker client to {}", work_address);
         client
     }
 
@@ -202,11 +202,6 @@ impl MetaData {
         &self.node.node_id
     }
 
-    /// Get the node worker service port
-    pub const fn get_worker_port(&self) -> u16 {
-        self.node.worker_port
-    }
-
     /// Is volume data ephemeral or not
     pub const fn is_ephemeral(&self) -> bool {
         self.ephemeral
@@ -217,6 +212,20 @@ impl MetaData {
         self.node.max_volumes_per_node
     }
 
+    /// Get node by ID
+    pub fn get_node_by_id(&self, node_id: &str) -> Option<DatenLordNode> {
+        let get_res = self
+            .etcd_client
+            .get_at_most_one_value(&format!("{}/{}", NODE_PREFIX, node_id));
+        match get_res {
+            Ok(val) => val,
+            Err(e) => {
+                warn!("failed to get node ID={}, the error is: {}", node_id, e);
+                None
+            }
+        }
+    }
+
     /// Get snapshot by ID
     pub fn get_snapshot_by_id(&self, snap_id: &str) -> Option<DatenLordSnapshot> {
         let get_res = self
@@ -225,7 +234,7 @@ impl MetaData {
         match get_res {
             Ok(val) => val,
             Err(e) => {
-                debug!("failed to get snapshot ID={}, the error is: {}", snap_id, e);
+                warn!("failed to get snapshot ID={}, the error is: {}", snap_id, e);
                 None
             }
         }
@@ -820,7 +829,7 @@ impl MetaData {
                             RpcStatusCode::INTERNAL,
                             format!(
                                 "failed to pre-populate data from source mount volume {} and name={}, \
-                                    the error is: {}", 
+                                    the error is: {}",
                                 src_volume.vol_id,
                                 src_volume.vol_name,
                                 e,

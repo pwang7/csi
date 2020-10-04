@@ -30,10 +30,6 @@ pub const CSI_PLUGIN_VERSION: &str = "0.1.0";
 /// This can be ephemeral within the container or persisted if
 /// backed by a Pod volume.
 pub const DATA_DIR: &str = "/tmp/csi-data-dir";
-/// The socket file to communicate with K8S CSI sidecars
-pub const END_POINT: &str = "unix:///tmp/csi.sock";
-/// The port of worker node
-pub const DEFAULT_PORT: u16 = 50051;
 /// Max storage capacity per volume,
 /// Default 20GB required by csi-sanity check
 pub const MAX_VOLUME_STORAGE_CAPACITY: i64 = 20 * 1024 * 1024 * 1024;

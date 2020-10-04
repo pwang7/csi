@@ -279,7 +279,7 @@ impl ControllerImpl {
                 ));
             }
         };
-        let client = self.meta_data.build_worker_client(&worker_node.node_id);
+        let client = MetaData::build_worker_client(&worker_node);
         let create_res = client.worker_create_volume(req);
         match create_res {
             Ok(resp) => Ok(resp),
@@ -323,7 +323,6 @@ impl Controller for ControllerImpl {
         sink: UnarySink<CreateVolumeResponse>,
     ) {
         debug!("create_volume request: {:?}", req);
-
         let rpc_type = ControllerServiceCapability_RPC_Type::CREATE_DELETE_VOLUME;
         if !self.validate_request_capability(rpc_type) {
             return util::fail(
@@ -456,16 +455,21 @@ impl Controller for ControllerImpl {
         // Do not return gRPC error when delete failed for idempotency
         let vol_res = self.meta_data.get_volume_by_id(vol_id);
         if let Some(vol) = vol_res {
-            let client = self.meta_data.build_worker_client(&vol.node_id);
-            let worker_delete_res = client.worker_delete_volume(&req);
-            match worker_delete_res {
-                Ok(_) => info!("successfully deleted volume ID={}", vol_id),
-                Err(e) => {
-                    warn!(
-                        "failed to delete volume ID={} on node ID={}, the error is: {}",
-                        vol_id, vol.node_id, e,
-                    );
+            let node_res = self.meta_data.get_node_by_id(&vol.node_id);
+            if let Some(node) = node_res {
+                let client = MetaData::build_worker_client(&node);
+                let worker_delete_res = client.worker_delete_volume(&req);
+                match worker_delete_res {
+                    Ok(_) => info!("successfully deleted volume ID={}", vol_id),
+                    Err(e) => {
+                        warn!(
+                            "failed to delete volume ID={} on node ID={}, the error is: {}",
+                            vol_id, vol.node_id, e,
+                        );
+                    }
                 }
+            } else {
+                warn!("failed to find node ID={} to get work port", vol.node_id);
             }
         } else {
             warn!(
@@ -694,16 +698,21 @@ impl Controller for ControllerImpl {
 
         match self.meta_data.get_volume_by_id(src_vol_id) {
             Some(src_vol) => {
-                let client = self.meta_data.build_worker_client(&src_vol.node_id);
-                let create_res = client.worker_create_snapshot(&req);
-                match create_res {
-                    Ok(r) => util::success(&ctx, sink, r),
-                    Err(e) => util::fail(
-                        &ctx,
-                        sink,
-                        RpcStatusCode::INTERNAL,
-                        format!("failed to create snapshot, the error is: {}", e),
-                    ),
+                let node_res = self.meta_data.get_node_by_id(&src_vol.node_id);
+                if let Some(node) = node_res {
+                    let client = MetaData::build_worker_client(&node);
+                    let create_res = client.worker_create_snapshot(&req);
+                    match create_res {
+                        Ok(r) => util::success(&ctx, sink, r),
+                        Err(e) => util::fail(
+                            &ctx,
+                            sink,
+                            RpcStatusCode::INTERNAL,
+                            format!("failed to create snapshot, the error is: {}", e),
+                        ),
+                    }
+                } else {
+                    warn!("failed to find node ID={} from etcd", src_vol.node_id);
                 }
             }
             None => util::fail(
@@ -747,16 +756,21 @@ impl Controller for ControllerImpl {
         // Do not return gRPC error when delete failed for idempotency
         let snap_res = self.meta_data.get_snapshot_by_id(snap_id);
         if let Some(snap) = snap_res {
-            let client = self.meta_data.build_worker_client(&snap.node_id);
-            let worker_delete_res = client.worker_delete_snapshot(&req);
-            match worker_delete_res {
-                Ok(_r) => info!("successfully deleted sanpshot ID={}", snap_id),
-                Err(e) => {
-                    error!(
-                        "failed to delete snapshot ID={} on node ID={}, the error is: {}",
-                        snap_id, snap.node_id, e,
-                    );
+            let node_res = self.meta_data.get_node_by_id(&snap.node_id);
+            if let Some(node) = node_res {
+                let client = MetaData::build_worker_client(&node);
+                let worker_delete_res = client.worker_delete_snapshot(&req);
+                match worker_delete_res {
+                    Ok(_r) => info!("successfully deleted sanpshot ID={}", snap_id),
+                    Err(e) => {
+                        error!(
+                            "failed to delete snapshot ID={} on node ID={}, the error is: {}",
+                            snap_id, snap.node_id, e,
+                        );
+                    }
                 }
+            } else {
+                warn!("failed to find node ID={} to get work port", snap.node_id);
             }
         } else {
             warn!("failed to find snapshot ID={} to delete", snap_id);
