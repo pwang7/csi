@@ -16,9 +16,8 @@ use utilities::Cast;
 
 use super::csi::{
     CreateVolumeRequest, ListSnapshotsResponse_Entry, ListVolumesResponse_Entry,
-    TopologyRequirement, VolumeCapability_AccessMode_Mode, VolumeContentSource,
-    VolumeContentSource_SnapshotSource, VolumeContentSource_VolumeSource,
-    VolumeContentSource_oneof_type,
+    VolumeCapability_AccessMode_Mode, VolumeContentSource, VolumeContentSource_SnapshotSource,
+    VolumeContentSource_VolumeSource, VolumeContentSource_oneof_type,
 };
 use super::datenlord_worker_grpc::WorkerClient;
 use super::etcd_client::EtcdClient;
@@ -130,10 +129,11 @@ impl MetaData {
     /// Register this worker to etcd
     fn register_to_etcd(&self, prefix: &str) -> anyhow::Result<()> {
         let key = format!("{}/{}", prefix, self.get_node_id());
+        debug!("register node ID={} to etcd", key);
         self.etcd_client
-            .write_new_kv(&key, &self.node)
+            .write_or_update_kv(&key, &self.node)
             .context(format!(
-                "duplicated node registration in etcd, the node ID={}",
+                "failed to registration in etcd, the node ID={}",
                 self.get_node_id(),
             ))
     }
@@ -153,16 +153,8 @@ impl MetaData {
         client
     }
 
-    /// Select a node to create volume or snapshot
-    pub fn select_node(&self, tplg: Option<&TopologyRequirement>) -> anyhow::Result<DatenLordNode> {
-        // TODO: select node by topology requirment, available space, etc
-        if let Some(topology) = tplg {
-            debug!(
-                "required topologies: {:?} and preferred topologies: {:?}",
-                topology.get_requisite(),
-                topology.get_preferred(),
-            );
-        }
+    /// Select a random node
+    fn select_random_node(&self) -> anyhow::Result<DatenLordNode> {
         // List key-value pairs with prefix
         let node_list: Vec<DatenLordNode> =
             self.etcd_client.get_list(&format!("{}/", NODE_PREFIX))?;
@@ -172,9 +164,6 @@ impl MetaData {
         );
         let mut rng = rand::thread_rng();
 
-        // Random select a node
-        // TODO: select node based on node available space,
-        // volume space requirment, and topology requirment
         let idx = rng.gen_range(0, node_list.len());
         if let Some(node) = node_list.get(idx) {
             Ok(node.clone())
@@ -183,6 +172,74 @@ impl MetaData {
                 "failed to get the {}-th node from returned node list, list={:?}",
                 idx, node_list,
             );
+        }
+    }
+
+    /// Get node id from request
+    fn get_node_id_from_request(&self, req: &CreateVolumeRequest) -> Option<String> {
+        if req.has_volume_content_source() {
+            let volume_src = req.get_volume_content_source();
+            if volume_src.has_snapshot() {
+                let snapshot_id = &volume_src.get_snapshot().snapshot_id;
+                let snapshot = self
+                    .get_snapshot_by_id(snapshot_id)
+                    .unwrap_or_else(|| panic!("failed to get snapshot ID={}", snapshot_id));
+                Some(snapshot.node_id)
+            } else if volume_src.has_volume() {
+                let volume_id = &volume_src.get_volume().volume_id;
+                let volume = self
+                    .get_volume_by_id(volume_id)
+                    .unwrap_or_else(|| panic!("failed to get volume ID={}", volume_id));
+                Some(volume.node_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Check node ID in request topology
+    fn check_node_id_in_request_topology(node_id: &str, req: &CreateVolumeRequest) -> bool {
+        if req.has_accessibility_requirements() {
+            let required_topology = req.get_accessibility_requirements().get_requisite();
+            let preferred_topology = req.get_accessibility_requirements().get_preferred();
+
+            if !required_topology
+                .iter()
+                .any(|t| t.get_segments().iter().any(|(_k, v)| v == node_id))
+                && !preferred_topology
+                    .iter()
+                    .any(|t| t.get_segments().iter().any(|(_k, v)| v == node_id))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Select a node to create volume or snapshot
+    pub fn select_node(&self, req: Option<&CreateVolumeRequest>) -> anyhow::Result<DatenLordNode> {
+        if let Some(request) = req {
+            let node_id_option = self.get_node_id_from_request(request);
+            if let Some(node_id) = node_id_option {
+                debug!("select node ID={} from request", node_id);
+                if Self::check_node_id_in_request_topology(&node_id, request) {
+                    if let Some(node) = self.get_node_by_id(&node_id) {
+                        Ok(node)
+                    } else {
+                        panic!("failed to get node ID={}", node_id);
+                    }
+                } else {
+                    panic!("select node ID={} is not in request required topology and preferred topology", node_id);
+                }
+            } else {
+                debug!("request doesn't have node id, select random node");
+                self.select_random_node()
+            }
+        } else {
+            debug!("empty request, select random node");
+            self.select_random_node()
         }
     }
 

@@ -245,16 +245,7 @@ impl ControllerImpl {
         &self,
         req: &CreateVolumeRequest,
     ) -> Result<CreateVolumeResponse, (RpcStatusCode, anyhow::Error)> {
-        let topology_requirement = if req.has_accessibility_requirements() {
-            Some(req.get_accessibility_requirements())
-        } else {
-            None
-        };
-        let select_res = self
-            .meta_data
-            .select_node(topology_requirement)
-            .context("failed to select a node");
-        let worker_node = match select_res {
+        let worker_node = match self.meta_data.select_node(Some(req)) {
             Ok(n) => n,
             Err(e) => {
                 error!(

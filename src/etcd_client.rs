@@ -1,6 +1,7 @@
 //! The etcd client implementation
 
 use anyhow::Context;
+use log::debug;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Debug;
@@ -44,6 +45,23 @@ impl EtcdClient {
             result_vec.push(decoded_value);
         }
         Ok(result_vec)
+    }
+
+    /// Get key-value from etcd
+    async fn get_one_kv_async<T: DeserializeOwned>(&self, key: &str) -> anyhow::Result<Option<T>> {
+        let req = etcd_rs::RangeRequest::new(etcd_rs::KeyRange::key(key));
+        let mut resp = self
+            .etcd_rs_client
+            .kv()
+            .range(req)
+            .await
+            .context("failed to get RangeResponse from etcd")?;
+
+        let kvs = resp.take_kvs();
+        match kvs.get(0) {
+            Some(kv) => Ok(Some(util::decode_from_bytes::<T>(kv.value())?)),
+            None => Ok(None),
+        }
     }
 
     /// Write a key value pair to etcd
@@ -104,14 +122,8 @@ impl EtcdClient {
         &self,
         key: &str,
     ) -> anyhow::Result<Option<T>> {
-        let mut value_list = smol::run(async move { self.get_list_async(key).await })?;
-        debug_assert!(
-            value_list.len() <= 1,
-            "failed to get zero or one key={} from etcd, but get {} values",
-            key,
-            value_list.len(),
-        );
-        Ok(value_list.pop())
+        let value = smol::run(async move { self.get_one_kv_async(key).await })?;
+        Ok(value)
     }
 
     /// Update a existing key value pair to etcd
@@ -128,7 +140,7 @@ impl EtcdClient {
         }
     }
 
-    /// Write a existing key value pair to etcd
+    /// Write a new key value pair to etcd
     pub fn write_new_kv<T: DeserializeOwned + Serialize + Clone + Debug + Send + Sync>(
         &self,
         key: &str,
@@ -144,6 +156,22 @@ impl EtcdClient {
         } else {
             Ok(())
         }
+    }
+
+    /// Write key value pair to etcd, if key exists, update it
+    pub fn write_or_update_kv<T: DeserializeOwned + Serialize + Clone + Debug + Send + Sync>(
+        &self,
+        key: &str,
+        value: &T,
+    ) -> anyhow::Result<()> {
+        let write_res = smol::run(async move { self.write_to_etcd(key, value).await })?;
+        if let Some(pre_value) = write_res {
+            debug!(
+                "key={} exists in etcd, the previous value={:?}, update it",
+                key, pre_value
+            );
+        }
+        Ok(())
     }
 
     /// Delete an existing key value pair from etcd
