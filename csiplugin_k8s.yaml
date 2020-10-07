@@ -194,7 +194,7 @@ spec:
       labels:
         app: csi-nodeplugin-datenlord
     spec:
-      hostNetwork: true # TODO: should use k8s network?
+      hostNetwork: false # TODO: should use k8s network?
       serviceAccount: csi-nodeplugin-sa
       priorityClassName: csi-datenlord-critical
       containers:
@@ -210,15 +210,20 @@ spec:
             - "--endpoint=$(CSI_NODE_ENDPOINT)"
             - "--drivername=csi.datenlord.io"
             - "--nodeid=$(NODE_ID)"
+            - "--nodeip=$(NODE_IP)"
             - "--workerport=50051"
             - "--runas=node"
             - "--datadir=$(DATA_DIR)"
-            - "--etcd=http://127.0.0.1:62379"
+            - "--etcd=http://csi-etcd-svc:2379"
           env:
             - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: CSI_NODE_ENDPOINT
               value: unix:///plugin/node.sock
             - name: RUST_LOG
@@ -327,6 +332,75 @@ spec:
         #    type: Directory
 
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csi-etcd-svc
+  namespace: csi-datenlord
+spec:
+  selector:
+    app: csi-etcd
+  ports:
+    - protocol: TCP
+      port: 2379
+      targetPort: 2379
+
+---
+kind: StatefulSet
+apiVersion: apps/v1
+metadata:
+  name: csi-etcd
+  namespace: csi-datenlord
+spec:
+  selector:
+    matchLabels:
+      app: csi-etcd
+  serviceName: "csi-etcd-svc"
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: csi-etcd
+    spec:
+      containers:
+        - name: etcd
+          image: gcr.io/etcd-development/etcd:latest
+          imagePullPolicy: "IfNotPresent"
+          command:
+            - "/usr/local/bin/etcd"
+          args:
+            - "--name=$(NODE_ID)"
+            - "--initial-advertise-peer-urls=http://$(NODE_IP):2380"
+            - "--listen-peer-urls=http://0.0.0.0:2380"
+            - "--advertise-client-urls=http://$(NODE_IP):2379"
+            - "--listen-client-urls=http://0.0.0.0:2379"
+            - "--initial-cluster=$(NODE_ID)=http://$(NODE_IP):2380"
+            - "--listen-metrics-urls=http://0.0.0.0:2381"
+            - "--data-dir=/var/run/etcd/default.etcd"
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 2381
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: etcd-data-dir
+              mountPath: /var/lib/etcd
+      volumes:
+        - name: etcd-data-dir
+          hostPath:
+            path: /var/lib/etcd
+            type: DirectoryOrCreate
+---
 kind: StatefulSet
 apiVersion: apps/v1
 metadata:
@@ -343,7 +417,7 @@ spec:
       labels:
         app: csi-controller-datenlord
     spec:
-      hostNetwork: true # TODO: should use k8s network?
+      hostNetwork: false # TODO: should use k8s network?
       serviceAccount: csi-controller-sa
       priorityClassName: csi-datenlord-critical
       containers:
@@ -359,15 +433,20 @@ spec:
             - "--endpoint=$(CSI_CONTROLLER_ENDPOINT)"
             - "--drivername=csi.datenlord.io"
             - "--nodeid=$(NODE_ID)"
+            - "--nodeip=$(NODE_IP)"
             - "--workerport=50051"
             - "--runas=controller"
             - "--datadir=$(DATA_DIR)"
-            - "--etcd=http://127.0.0.1:62379"
+            - "--etcd=http://csi-etcd-svc:2379"
           env:
             - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: CSI_CONTROLLER_ENDPOINT
               value: unix:///plugin/controller.sock
             - name: RUST_LOG
@@ -393,30 +472,6 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /plugin
-        - name: etcd
-          image: gcr.io/etcd-development/etcd:latest
-          imagePullPolicy: "IfNotPresent"
-          command:
-            - "/usr/local/bin/etcd"
-          args:
-            - "--name=$(NODE_ID)"
-            - "--initial-advertise-peer-urls=http://$(NODE_ID):62380"
-            - "--listen-peer-urls=http://0.0.0.0:62380"
-            - "--advertise-client-urls=http://$(NODE_ID):62379"
-            - "--listen-client-urls=http://0.0.0.0:62379"
-            - "--initial-cluster=$(NODE_ID)=http://$(NODE_ID):62380"
-            - "--listen-metrics-urls=http://0.0.0.0:62381"
-          env:
-            - name: NODE_ID
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 62381
-            initialDelaySeconds: 10
-            periodSeconds: 5
         - name: csi-attacher
           securityContext:
             # This is necessary only for systems with SELinux, where

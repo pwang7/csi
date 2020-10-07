@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::convert::From;
 use std::fmt::Debug;
 use std::fs::{self, File};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use utilities::Cast;
@@ -34,14 +35,15 @@ pub struct DatenLordNode {
     pub max_available_space_bytes: i64,
     /// Max volumes per node
     pub max_volumes_per_node: i32,
-    // /// Node IP
-    // pub ip_address: String, // TODO: add node IP address
+    /// Node IP
+    pub ip_address: IpAddr,
 }
 
 impl DatenLordNode {
     /// Create `DatenLordNode`
     pub const fn new(
         node_id: String,
+        ip_address: IpAddr,
         worker_port: u16,
         max_available_space_bytes: i64,
         max_volumes_per_node: i32,
@@ -51,6 +53,7 @@ impl DatenLordNode {
             worker_port,
             max_available_space_bytes,
             max_volumes_per_node,
+            ip_address,
         }
     }
 }
@@ -144,7 +147,7 @@ impl MetaData {
         let work_address = if node.worker_port == 0 {
             util::LOCAL_WORKER_SOCKET.to_string()
         } else {
-            format!("{}:{}", node.node_id, node.worker_port)
+            format!("{}:{}", node.ip_address, node.worker_port)
         };
         let ch = ChannelBuilder::new(env).connect(&work_address);
         let client = WorkerClient::new(ch);
@@ -200,6 +203,11 @@ impl MetaData {
     /// Get the node ID
     pub fn get_node_id(&self) -> &str {
         &self.node.node_id
+    }
+
+    /// Get node
+    pub const fn get_node(&self) -> &DatenLordNode {
+        &self.node
     }
 
     /// Is volume data ephemeral or not
@@ -793,7 +801,7 @@ impl MetaData {
                 assert_eq!(
                     src_volume.node_id,
                     self.get_node_id(),
-                    "snapshot ID={} is on node ID={} not on local node ID={}",
+                    "volume ID={} is on node ID={} not on local node ID={}",
                     src_volume_id,
                     src_volume.node_id,
                     self.get_node_id(),
