@@ -3,6 +3,9 @@ on:
   pull_request:
     branches: [master]
 
+env:
+  CI_RUST_TOOLCHAIN: 1.46.0
+
 jobs:
   outdated:
     name: Outdated
@@ -36,7 +39,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
           override: true
       - uses: actions-rs/cargo@v1
         with:
@@ -165,7 +168,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
           override: true
       - name: Install build dependencies
         run: sudo apt install -y cmake g++ libprotobuf-dev protobuf-compiler
@@ -178,7 +181,7 @@ jobs:
           export BUILD_DIR=/tmp/datenlord_container_build
           mkdir -p $BUILD_DIR
           cp target/debug/csi $BUILD_DIR
-          docker build $BUILD_DIR --file ./Dockerfile --tag datenlord/csiplugin:latest
+          docker build $BUILD_DIR --file ./Dockerfile --tag datenlord/csiplugin:e2e_test
       - name: Deploy DatenLord CSI plugin to K8s
         run: |
           kubectl cluster-info
@@ -202,11 +205,11 @@ jobs:
           kubectl wait --for=condition=Ready pod -l app=csi-nodeplugin-datenlord -n csi-datenlord --timeout=60s
           wget https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml
           wget https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml
-          sed -e 's/namespace\:\ default/namespace\:\ csi\-datenlord/g' setup-snapshot-controller.yaml > datenlord-setup-snapshot-controller.yaml
-          sed -e 's/namespace\:\ default/namespace\:\ csi\-datenlord/g' rbac-snapshot-controller.yaml > datenlord-rbac-snapshot-controller.yaml
+          sed -e 's/namespace\:\ default/namespace\:\ kube\-system/g' rbac-snapshot-controller.yaml > datenlord-rbac-snapshot-controller.yaml
+          sed -e 's/namespace\:\ default/namespace\:\ kube\-system/g' setup-snapshot-controller.yaml > datenlord-setup-snapshot-controller.yaml
           kubectl apply -f datenlord-rbac-snapshot-controller.yaml
           kubectl apply -f datenlord-setup-snapshot-controller.yaml
-          kubectl wait --for=condition=Ready pod -l app=snapshot-controller -n csi-datenlord --timeout=60s
+          kubectl wait --for=condition=Ready pod -l app=snapshot-controller -n kube-system --timeout=60s
           kubectl get pods -A -o wide
           sudo netstat -lntp && ls -lsh
       - name: E2E Test
@@ -250,7 +253,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
           override: true
       - name: Cargo build
         uses: actions-rs/cargo@v1
@@ -334,8 +337,9 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
           override: true
+      - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
         with:
           command: fmt
@@ -350,8 +354,9 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
           override: true
+      - run: rustup component add clippy
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
@@ -368,7 +373,7 @@ jobs:
 #        uses: actions-rs/toolchain@v1
 #        with:
 #          profile: minimal
-#          toolchain: stable
+#          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
 #          override: true
 #
 #      - name: Run cargo-tarpaulin

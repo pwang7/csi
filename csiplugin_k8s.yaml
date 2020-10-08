@@ -204,7 +204,7 @@ spec:
             capabilities:
               add: ["SYS_ADMIN"]
             allowPrivilegeEscalation: true
-          image: datenlord/csiplugin:latest
+          image: datenlord/csiplugin:e2e_test
           imagePullPolicy: "IfNotPresent"
           args :
             - "--endpoint=$(CSI_NODE_ENDPOINT)"
@@ -364,7 +364,7 @@ spec:
     spec:
       containers:
         - name: etcd
-          image: gcr.io/etcd-development/etcd:latest
+          image: gcr.io/etcd-development/etcd:v3.4.13
           imagePullPolicy: "IfNotPresent"
           command:
             - "/usr/local/bin/etcd"
@@ -427,7 +427,7 @@ spec:
             # non-privileged sidecar containers cannot access unix domain socket
             # created by privileged CSI driver container.
             privileged: true
-          image: datenlord/csiplugin:latest
+          image: datenlord/csiplugin:e2e_test
           imagePullPolicy: "IfNotPresent"
           args :
             - "--endpoint=$(CSI_CONTROLLER_ENDPOINT)"
