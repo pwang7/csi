@@ -33,8 +33,8 @@ impl WorkerImpl {
         vol_size: i64,
         content_source: &VolumeSource,
     ) -> (RpcStatusCode, String) {
-        match content_source {
-            VolumeSource::Snapshot(source_snapshot_id) => {
+        match *content_source {
+            VolumeSource::Snapshot(ref source_snapshot_id) => {
                 let (rpc_status_code, msg) = self.meta_data.copy_volume_from_snapshot(
                     vol_size,
                     source_snapshot_id,
@@ -59,7 +59,7 @@ impl WorkerImpl {
                     (rpc_status_code, msg)
                 }
             }
-            VolumeSource::Volume(source_volume_id) => {
+            VolumeSource::Volume(ref source_volume_id) => {
                 let (rpc_status_code, msg) = self.meta_data.copy_volume_from_volume(
                     vol_size,
                     source_volume_id,
@@ -132,7 +132,7 @@ impl Worker for WorkerImpl {
             }
         };
 
-        if let Some(content_source) = &volume.content_source {
+        if let Some(ref content_source) = volume.content_source {
             let (rpc_status_code, err_msg) =
                 self.build_volume_from_source(&vol_id_str, vol_name, vol_size, content_source);
             if RpcStatusCode::OK != rpc_status_code {

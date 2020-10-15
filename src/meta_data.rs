@@ -400,11 +400,7 @@ impl MetaData {
             entry.mut_volume().set_capacity_bytes(vol.get_size());
             entry.mut_volume().set_volume_id(vol.vol_id.clone());
             entry.mut_volume().set_content_source(VolumeContentSource {
-                field_type: if let Some(vcs) = &vol.content_source {
-                    Some(vcs.clone().into())
-                } else {
-                    None
-                },
+                field_type: vol.content_source.as_ref().map(|vcs| vcs.clone().into()),
                 ..VolumeContentSource::default()
             });
 
@@ -1355,11 +1351,7 @@ impl DatenLordVolume {
             .into_iter()
             .map(VolumeAccessMode::from)
             .collect::<Vec<_>>();
-        let vol_source = if let Some(vcs) = content_source {
-            Some(VolumeSource::from(vcs))
-        } else {
-            None
-        };
+        let vol_source = content_source.map(VolumeSource::from);
         let vol = Self {
             vol_id: basic_fields.vol_id,
             vol_name: basic_fields.vol_name,

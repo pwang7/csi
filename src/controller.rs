@@ -95,7 +95,7 @@ impl ControllerImpl {
                 }
 
                 if req.has_volume_content_source() {
-                    let ex_vol_content_source = if let Some(vcs) = &ex_vol.content_source {
+                    let ex_vol_content_source = if let Some(ref vcs) = ex_vol.content_source {
                         vcs
                     } else {
                         return (
@@ -109,11 +109,11 @@ impl ControllerImpl {
                     };
 
                     let volume_source = req.get_volume_content_source();
-                    if let Some(volume_source_type) = &volume_source.field_type {
-                        match volume_source_type {
-                            VolumeContentSource_oneof_type::snapshot(snapshot_source) => {
+                    if let Some(ref volume_source_type) = volume_source.field_type {
+                        match *volume_source_type {
+                            VolumeContentSource_oneof_type::snapshot(ref snapshot_source) => {
                                 let parent_snap_id = snapshot_source.get_snapshot_id();
-                                if let VolumeSource::Snapshot(psid) = ex_vol_content_source {
+                                if let VolumeSource::Snapshot(ref psid) = *ex_vol_content_source {
                                     if psid != parent_snap_id {
                                         return (
                                             RpcStatusCode::ALREADY_EXISTS,
@@ -137,9 +137,9 @@ impl ControllerImpl {
                                     );
                                 }
                             }
-                            VolumeContentSource_oneof_type::volume(volume_source) => {
+                            VolumeContentSource_oneof_type::volume(ref volume_source) => {
                                 let parent_vol_id = volume_source.get_volume_id();
-                                if let VolumeSource::Volume(pvid) = ex_vol_content_source {
+                                if let VolumeSource::Volume(ref pvid) = *ex_vol_content_source {
                                     if pvid != parent_vol_id {
                                         return (
                                             RpcStatusCode::ALREADY_EXISTS,

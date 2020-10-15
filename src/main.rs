@@ -32,6 +32,7 @@
 )]
 #![allow(
     // Some explicitly allowed Clippy lints, must have clear reason to allow
+    clippy::blanket_clippy_restriction_lints, // allow denying clippy::restriction directly
     clippy::implicit_return, // actually omitting the return keyword is idiomatic Rust code
     clippy::module_name_repetitions, // repeation of module name in a struct name is not big deal
     clippy::multiple_crate_versions, // multi-version dependency crates is not able to fix
@@ -1013,7 +1014,7 @@ mod test {
             .map(|vol| vol.get_volume().get_volume_id())
             .collect::<Vec<_>>();
         let mut vol_vec1 = all_vol_vec.clone();
-        vol_vec1.sort();
+        vol_vec1.sort_unstable();
         let mut expect_vol_vec1 = volumes.clone();
         expect_vol_vec1.sort();
         assert_eq!(vol_vec1, expect_vol_vec1, "list volume result not match");
@@ -1036,12 +1037,12 @@ mod test {
             .iter()
             .map(|vol| vol.get_volume().get_volume_id())
             .collect::<Vec<_>>();
-        vol_vec2.sort();
+        vol_vec2.sort_unstable();
         let end_pos = starting_pos.overflow_add(max_entries.cast::<usize>());
         let mut expect_vol_vec2 = all_vol_vec
             .get(starting_pos..end_pos)
             .map_or(Vec::new(), std::borrow::ToOwned::to_owned);
-        expect_vol_vec2.sort();
+        expect_vol_vec2.sort_unstable();
         assert_eq!(vol_vec2, expect_vol_vec2, "list volume result not match");
         let next_starting_pos = starting_pos.overflow_add(max_entries.cast::<usize>());
         assert_eq!(
@@ -1124,9 +1125,9 @@ mod test {
             .iter()
             .map(|vol| vol.get_volume().get_volume_id())
             .collect::<Vec<_>>();
-        vol_vec1.sort();
+        vol_vec1.sort_unstable();
         let mut expect_vol_vec1 = vec![volume1.get_volume_id(), volume2.get_volume_id()];
-        expect_vol_vec1.sort();
+        expect_vol_vec1.sort_unstable();
         assert_eq!(vol_vec1, expect_vol_vec1, "list volume result not match",);
         assert_eq!(
             list_vol_resp1.get_next_token(),

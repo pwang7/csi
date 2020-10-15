@@ -258,17 +258,16 @@ impl Node for NodeImpl {
 
         // Kubernetes 1.15 doesn't have csi.storage.k8s.io/ephemeral
         let context_ephemeral_res = volume_context.get(util::EPHEMERAL_KEY_CONTEXT);
-        let ephemeral = if let Some(context_ephemeral_val) = context_ephemeral_res {
-            if context_ephemeral_val == "true" {
-                true
-            } else if context_ephemeral_val == "false" {
-                false
-            } else {
-                self.meta_data.is_ephemeral()
-            }
-        } else {
-            self.meta_data.is_ephemeral()
-        };
+        let ephemeral =
+            context_ephemeral_res.map_or(self.meta_data.is_ephemeral(), |context_ephemeral_val| {
+                if context_ephemeral_val == "true" {
+                    true
+                } else if context_ephemeral_val == "false" {
+                    false
+                } else {
+                    self.meta_data.is_ephemeral()
+                }
+            });
 
         // If ephemeral is true, create volume here to avoid errors if not exists
         if ephemeral && !self.meta_data.find_volume_by_id(vol_id) {
@@ -278,7 +277,7 @@ impl Node for NodeImpl {
             }
         }
 
-        match &req.get_volume_capability().access_type {
+        match req.get_volume_capability().access_type {
             None => {
                 return util::fail(
                     &ctx,
@@ -287,8 +286,9 @@ impl Node for NodeImpl {
                     "access_type missing in request".to_owned(),
                 );
             }
-            Some(access_type) => {
-                if let VolumeCapability_oneof_access_type::mount(volume_mount_option) = access_type
+            Some(ref access_type) => {
+                if let VolumeCapability_oneof_access_type::mount(ref volume_mount_option) =
+                    *access_type
                 {
                     let fs_type = volume_mount_option.get_fs_type();
                     let mount_flags = volume_mount_option.get_mount_flags();
