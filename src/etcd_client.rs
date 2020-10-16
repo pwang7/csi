@@ -1,6 +1,6 @@
 //! The etcd client implementation
 
-use anyhow::anyhow;
+use anyhow::Context;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Debug;
@@ -20,14 +20,13 @@ impl EtcdClient {
             etcd_rs::Client::connect(etcd_rs::ClientConfig {
                 endpoints: etcd_address_vec.clone(),
                 auth: None,
+                tls: None,
             })
             .await
-            .map_err(|e| {
-                anyhow!(format!(
-                    "failed to build etcd client to {:?}, the error is: {}",
-                    etcd_address_vec, e,
-                ))
-            })
+            .context(format!(
+                "failed to build etcd client to addresses={:?}",
+                etcd_address_vec,
+            ))
         })?;
         Ok(Self { etcd_rs_client })
     }
@@ -35,10 +34,10 @@ impl EtcdClient {
     /// Get key-value list from etcd
     async fn get_list_async<T: DeserializeOwned>(&self, prefix: &str) -> anyhow::Result<Vec<T>> {
         let req = etcd_rs::RangeRequest::new(etcd_rs::KeyRange::prefix(prefix));
-        let mut resp =
-            self.etcd_rs_client.kv().range(req).await.map_err(|e| {
-                anyhow!("failed to get RangeResponse from etcd, the error is: {}", e)
-            })?;
+        let mut resp = self.etcd_rs_client.kv().range(req).await.context(format!(
+            "failed to get RangeResponse from etcd for key={:?}",
+            prefix,
+        ))?;
         let mut result_vec = Vec::with_capacity(resp.count());
         for kv in resp.take_kvs() {
             let decoded_value: T = util::decode_from_bytes(kv.value())?;
@@ -53,21 +52,14 @@ impl EtcdClient {
         key: &str,
         value: &T,
     ) -> anyhow::Result<Option<T>> {
-        let bin_value = bincode::serialize(value).map_err(|e| {
-            anyhow!(
-                "failed to encode {:?} to binary, the error is: {}",
-                value,
-                e,
-            )
-        })?;
+        let bin_value =
+            bincode::serialize(value).context(format!("failed to encode {:?} to binary", value))?;
         let mut req = etcd_rs::PutRequest::new(key, bin_value);
         req.set_prev_kv(true); // Return previous value
-        let mut resp = self
-            .etcd_rs_client
-            .kv()
-            .put(req)
-            .await
-            .map_err(|e| anyhow!("failed to get PutResponse from etcd, the error is: {}", e))?;
+        let mut resp = self.etcd_rs_client.kv().put(req).await.context(format!(
+            "failed to get PutResponse from etcd for key={:?}, value={:?}",
+            key, value,
+        ))?;
         if let Some(pre_kv) = resp.take_prev_kv() {
             let decoded_value: T = util::decode_from_bytes(pre_kv.value())?;
             Ok(Some(decoded_value))
@@ -83,12 +75,10 @@ impl EtcdClient {
     ) -> anyhow::Result<Vec<T>> {
         let mut req = etcd_rs::DeleteRequest::new(etcd_rs::KeyRange::key(key));
         req.set_prev_kv(true);
-        let mut resp = self.etcd_rs_client.kv().delete(req).await.map_err(|e| {
-            anyhow!(
-                "failed to get DeleteResponse from etcd, the error is: {}",
-                e,
-            )
-        })?;
+        let mut resp = self.etcd_rs_client.kv().delete(req).await.context(format!(
+            "failed to get DeleteResponse from etcd for key={:?}",
+            key,
+        ))?;
 
         if resp.has_prev_kvs() {
             let deleted_value_list = resp.take_prev_kvs();
@@ -182,13 +172,8 @@ impl EtcdClient {
     pub fn delete_all(&self) -> anyhow::Result<()> {
         let mut req = etcd_rs::DeleteRequest::new(etcd_rs::KeyRange::all());
         req.set_prev_kv(false);
-        smol::run(async move {
-            self.etcd_rs_client
-                .kv()
-                .delete(req)
-                .await
-                .map_err(|e| anyhow!("failed to clear all data from etcd, the error is: {}", e,))
-        })?;
+        smol::run(async move { self.etcd_rs_client.kv().delete(req).await })
+            .context("failed to delete all data from etcd")?;
         Ok(())
     }
 }

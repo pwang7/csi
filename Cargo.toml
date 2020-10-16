@@ -16,7 +16,7 @@ categories = ["filesystem"]
 anyhow = "1.0.31"
 bincode = "1.3.1"
 env_logger = "0.6.0"
-etcd-rs = "0.2.2"
+etcd-rs = { git = "https://github.com/datenlord/etcd-client", rev="3f2feab" }
 clap = "2.33.3"
 flate2 = "1.0.16"
 futures = "0.3.5"
