@@ -1,5 +1,6 @@
 //! The implementation for CSI node service
 
+use anyhow::{anyhow, Context};
 use grpcio::{RpcContext, RpcStatusCode, UnarySink};
 use log::{debug, error, info, warn};
 use nix::sys::stat::{self, SFlag};
@@ -53,24 +54,22 @@ impl NodeImpl {
     }
 
     /// Create ephemeral volume
-    fn create_ephemeral_volume(&self, vol_id: &str) -> (RpcStatusCode, String) {
+    fn create_ephemeral_volume(&self, vol_id: &str) -> Result<(), (RpcStatusCode, anyhow::Error)> {
         let vol_name = format!("ephemeral-{}", vol_id);
         let vol_res = DatenLordVolume::build_ephemeral_volume(
             vol_id,
             &vol_name,
             self.meta_data.get_node_id(),
             &self.meta_data.get_volume_path(vol_id),
-        );
+        )
+        .context(format!(
+            "failed to create ephemeral volume ID={} and name={}",
+            vol_id, vol_name,
+        ));
         let volume = match vol_res {
             Ok(v) => v,
             Err(e) => {
-                return (
-                    RpcStatusCode::INTERNAL,
-                    format!(
-                        "failed to create ephemeral volume ID={} and name={}, the errir is: {}",
-                        vol_id, vol_name, e
-                    ),
-                );
+                return Err((RpcStatusCode::INTERNAL, e));
             }
         };
         info!(
@@ -85,7 +84,7 @@ impl NodeImpl {
                 vol_id, vol_name,
             )
         );
-        (RpcStatusCode::OK, "".to_owned())
+        Ok(())
     }
 
     /// Delete ephemeral volume
@@ -97,13 +96,17 @@ impl NodeImpl {
                 error!(
                     "failed to delete ephemeral volume ID={} and name={}, \
                         the error is: {}",
-                    volume.vol_id, volume.vol_name, e,
+                    volume.vol_id,
+                    volume.vol_name,
+                    util::format_anyhow_error(&e),
                 );
             } else {
                 panic!(
                     "failed to delete ephemeral volume ID={} and name={}, \
                         the error is: {}",
-                    volume.vol_id, volume.vol_name, e,
+                    volume.vol_id,
+                    volume.vol_name,
+                    util::format_anyhow_error(&e),
                 );
             }
         }
@@ -113,16 +116,45 @@ impl NodeImpl {
                 error!(
                     "failed to delete the directory of ephemerial volume ID={}, \
                         the error is: {}",
-                    volume.vol_id, e,
+                    volume.vol_id,
+                    util::format_anyhow_error(&e),
                 );
             } else {
                 panic!(
                     "failed to delete the directory of ephemerial volume ID={}, \
                         the error is: {}",
-                    volume.vol_id, e,
+                    volume.vol_id,
+                    util::format_anyhow_error(&e),
                 );
             }
         }
+    }
+
+    /// The pre-check helper function for `node_publish_volume`
+    fn node_publish_volume_pre_check(
+        req: &NodePublishVolumeRequest,
+    ) -> Result<(), (RpcStatusCode, anyhow::Error)> {
+        if !req.has_volume_capability() {
+            return Err((
+                RpcStatusCode::INVALID_ARGUMENT,
+                anyhow!("volume capability missing in request"),
+            ));
+        }
+        let vol_id = req.get_volume_id();
+        if vol_id.is_empty() {
+            return Err((
+                RpcStatusCode::INVALID_ARGUMENT,
+                anyhow!("volume ID missing in request"),
+            ));
+        }
+        let target_dir = req.get_target_path();
+        if target_dir.is_empty() {
+            return Err((
+                RpcStatusCode::INVALID_ARGUMENT,
+                anyhow!("target path missing in request"),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -141,7 +173,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("unsupported capability {:?}", rpc_type),
+                &anyhow!(format!("unsupported capability {:?}", rpc_type)),
             );
         }
 
@@ -152,7 +184,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume ID missing in request".to_owned(),
+                &anyhow!("volume ID missing in request"),
             );
         }
         if req.get_staging_target_path().is_empty() {
@@ -160,7 +192,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "target path missing in request".to_owned(),
+                &anyhow!("target path missing in request"),
             );
         }
         if !req.has_volume_capability() {
@@ -168,7 +200,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume Capability missing in request".to_owned(),
+                &anyhow!("volume Capability missing in request"),
             );
         }
 
@@ -190,7 +222,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("unsupported capability {:?}", rpc_type),
+                &anyhow!(format!("unsupported capability {:?}", rpc_type)),
             );
         }
 
@@ -200,7 +232,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume ID missing in request".to_owned(),
+                &anyhow!("volume ID missing in request"),
             );
         }
         if req.get_staging_target_path().is_empty() {
@@ -208,7 +240,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "target path missing in request".to_owned(),
+                &anyhow!("target path missing in request"),
             );
         }
         let r = NodeUnstageVolumeResponse::new();
@@ -223,32 +255,36 @@ impl Node for NodeImpl {
     ) {
         debug!("node_publish_volume request: {:?}", req);
 
-        if !req.has_volume_capability() {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INVALID_ARGUMENT,
-                "volume capability missing in request".to_owned(),
-            );
+        if let Err((rpc_status_code, e)) = Self::node_publish_volume_pre_check(&req) {
+            return util::fail(&ctx, sink, rpc_status_code, &e);
         }
-        let vol_id = req.get_volume_id();
-        if vol_id.is_empty() {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INVALID_ARGUMENT,
-                "volume ID missing in request".to_owned(),
-            );
-        }
-        let target_dir = req.get_target_path();
-        if target_dir.is_empty() {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INVALID_ARGUMENT,
-                "target path missing in request".to_owned(),
-            );
-        }
+        // if !req.has_volume_capability() {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::INVALID_ARGUMENT,
+        //         &anyhow!("volume capability missing in request"),
+        //     );
+        // }
+        // let vol_id = req.get_volume_id();
+        // if vol_id.is_empty() {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::INVALID_ARGUMENT,
+        //         &anyhow!("volume ID missing in request"),
+        //     );
+        // }
+        // let target_dir = req.get_target_path();
+        // if target_dir.is_empty() {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::INVALID_ARGUMENT,
+        //         &anyhow!("target path missing in request"),
+        //     );
+        // }
+
         let read_only = req.get_readonly();
         let volume_context = req.get_volume_context();
         let device_id = match volume_context.get("deviceID") {
@@ -269,21 +305,28 @@ impl Node for NodeImpl {
                 }
             });
 
+        let vol_id = req.get_volume_id();
         // If ephemeral is true, create volume here to avoid errors if not exists
         if ephemeral && !self.meta_data.find_volume_by_id(vol_id) {
-            let (rpc_status_code, err_msg) = self.create_ephemeral_volume(vol_id);
-            if RpcStatusCode::OK != rpc_status_code {
-                return util::fail(&ctx, sink, RpcStatusCode::INTERNAL, err_msg);
+            let create_res = self.create_ephemeral_volume(vol_id);
+            if let Err((rpc_status_code, e)) = create_res {
+                warn!(
+                    "failed to create ephemeral volume ID={}, RpcStatusCode={}, the error is:{}",
+                    vol_id,
+                    rpc_status_code,
+                    util::format_anyhow_error(&e),
+                );
+                return util::fail(&ctx, sink, RpcStatusCode::INTERNAL, &e);
             }
         }
-
+        let target_dir = req.get_target_path();
         match req.get_volume_capability().access_type {
             None => {
                 return util::fail(
                     &ctx,
                     sink,
                     RpcStatusCode::INVALID_ARGUMENT,
-                    "access_type missing in request".to_owned(),
+                    &anyhow!("access_type missing in request"),
                 );
             }
             Some(ref access_type) => {
@@ -305,7 +348,7 @@ impl Node for NodeImpl {
                         mount_options,
                     );
                     // Bind mount from target_dir to vol_path
-                    let (rpc_status_code, err_msg) = self.meta_data.bind_mount(
+                    let build_res = self.meta_data.bind_mount(
                         target_dir,
                         fs_type,
                         read_only,
@@ -313,8 +356,8 @@ impl Node for NodeImpl {
                         &mount_options,
                         ephemeral,
                     );
-                    if RpcStatusCode::OK != rpc_status_code {
-                        return util::fail(&ctx, sink, rpc_status_code, err_msg);
+                    if let Err((rpc_status_code, e)) = build_res {
+                        return util::fail(&ctx, sink, rpc_status_code, &e);
                     }
                 } else {
                     // VolumeCapability_oneof_access_type::block(..) not supported
@@ -322,7 +365,7 @@ impl Node for NodeImpl {
                         &ctx,
                         sink,
                         RpcStatusCode::INVALID_ARGUMENT,
-                        format!("unsupported access type {:?}", access_type),
+                        &anyhow!(format!("unsupported access type {:?}", access_type)),
                     );
                 }
             }
@@ -347,7 +390,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume ID missing in request".to_owned(),
+                &anyhow!("volume ID missing in request"),
             );
         }
         let target_path = req.get_target_path();
@@ -356,7 +399,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "target path missing in request".to_owned(),
+                &anyhow!("target path missing in request"),
             );
         }
 
@@ -367,7 +410,7 @@ impl Node for NodeImpl {
                     &ctx,
                     sink,
                     RpcStatusCode::NOT_FOUND,
-                    format!("failed to find volume ID={}", vol_id),
+                    &anyhow!(format!("failed to find volume ID={}", vol_id)),
                 )
             }
         };
@@ -384,7 +427,9 @@ impl Node for NodeImpl {
                 warn!(
                     "failed to delete mount path={} of volume ID={} from etcd, \
                         the error is: {}",
-                    target_path, vol_id, e,
+                    target_path,
+                    vol_id,
+                    util::format_anyhow_error(&e),
                 );
                 return util::success(&ctx, sink, r);
             }
@@ -409,13 +454,17 @@ impl Node for NodeImpl {
                 // Try to un-mount the path not stored in etcd, if error just log it
                 warn!(
                     "failed to un-mount volume ID={} bind path={}, the error is: {}",
-                    vol_id, target_path, e,
+                    vol_id,
+                    target_path,
+                    util::format_anyhow_error(&e),
                 );
             } else {
                 // Un-mount the path stored in etcd, if error then panic
                 panic!(
                     "failed to un-mount volume ID={} bind path={}, the error is: {}",
-                    vol_id, target_path, e,
+                    vol_id,
+                    target_path,
+                    util::format_anyhow_error(&e),
                 );
             }
         } else {
@@ -445,7 +494,12 @@ impl Node for NodeImpl {
     ) {
         debug!("node_get_volume_stats request: {:?}", req);
 
-        util::fail(&ctx, sink, RpcStatusCode::UNIMPLEMENTED, "".to_owned())
+        util::fail(
+            &ctx,
+            sink,
+            RpcStatusCode::UNIMPLEMENTED,
+            &anyhow!("unimplemented"),
+        )
     }
 
     // node_expand_volume is only implemented so the driver can be used for e2e testing
@@ -465,7 +519,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume ID missing in request".to_owned(),
+                &anyhow!("volume ID missing in request"),
             );
         }
 
@@ -475,7 +529,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume path missing in request".to_owned(),
+                &anyhow!("volume path missing in request"),
             );
         }
 
@@ -484,7 +538,7 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::NOT_FOUND,
-                format!("failed to find volume ID={}", vol_id),
+                &anyhow!(format!("failed to find volume ID={}", vol_id)),
             );
         };
 
@@ -493,37 +547,33 @@ impl Node for NodeImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume expand capacity missing in request".to_owned(),
+                &anyhow!("volume expand capacity missing in request"),
             );
         }
 
-        let stat_res = stat::stat(vol_path);
+        let stat_res =
+            stat::stat(vol_path).context(format!("failed to get file stat of {}", vol_path));
         let file_stat = match stat_res {
             Ok(s) => s,
             Err(e) => {
-                return util::fail(
-                    &ctx,
-                    sink,
-                    RpcStatusCode::INVALID_ARGUMENT,
-                    format!(
-                        "failed to get file stat of {}, the error is: {}",
-                        vol_path, e,
-                    ),
-                );
+                return util::fail(&ctx, sink, RpcStatusCode::INVALID_ARGUMENT, &e);
             }
         };
 
         let sflag = SFlag::from_bits_truncate(file_stat.st_mode);
         if let SFlag::S_IFDIR = sflag {
             // SFlag::S_IFBLK and other type not supported
+            // TODO: implement volume expansion here
             debug!("volume access type mount requires volume file type directory");
-        // TODO: implement volume expansion here
         } else {
             return util::fail(
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("volume ID={} has unsupported file type={:?}", vol_id, sflag,),
+                &anyhow!(format!(
+                    "volume ID={} has unsupported file type={:?}",
+                    vol_id, sflag
+                )),
             );
         }
 

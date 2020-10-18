@@ -1,6 +1,6 @@
 //! The implementation for CSI controller service
 
-use anyhow::{self, Context};
+use anyhow::{anyhow, Context};
 use grpcio::{RpcContext, RpcStatusCode, UnarySink};
 use log::{debug, error, info, warn};
 use protobuf::RepeatedField;
@@ -74,108 +74,98 @@ impl ControllerImpl {
     fn find_existing_volume(
         &self,
         req: &CreateVolumeRequest,
-    ) -> (RpcStatusCode, String, Option<CreateVolumeResponse>) {
+    ) -> Result<Option<CreateVolumeResponse>, (RpcStatusCode, anyhow::Error)> {
         let vol_name = req.get_name();
         let get_vol_res = self.meta_data.get_volume_by_name(vol_name);
-        match get_vol_res {
-            Some(ex_vol) => {
-                // It means the volume with the same name already exists
-                // need to check if the size of existing volume is the same as in new
-                // request
-                let volume_size = req.get_capacity_range().get_required_bytes();
-                if ex_vol.get_size() != volume_size {
-                    return (
+        if let Some(ex_vol) = get_vol_res {
+            // It means the volume with the same name already exists
+            // need to check if the size of existing volume is the same as in new
+            // request
+            let volume_size = req.get_capacity_range().get_required_bytes();
+            if ex_vol.get_size() != volume_size {
+                return Err((
+                    RpcStatusCode::ALREADY_EXISTS,
+                    anyhow!(format!(
+                        "volume with the same name={} already exist but with different size",
+                        vol_name,
+                    )),
+                ));
+            }
+
+            if req.has_volume_content_source() {
+                let ex_vol_content_source = if let Some(ref vcs) = ex_vol.content_source {
+                    vcs
+                } else {
+                    return Err((
                         RpcStatusCode::ALREADY_EXISTS,
-                        format!(
-                            "volume with the same name={} already exist but with different size",
-                            vol_name,
-                        ),
-                        None,
-                    );
-                }
+                        anyhow!(format!(
+                            "existing volume ID={} doesn't have content source",
+                            ex_vol.vol_id,
+                        )),
+                    ));
+                };
 
-                if req.has_volume_content_source() {
-                    let ex_vol_content_source = if let Some(ref vcs) = ex_vol.content_source {
-                        vcs
-                    } else {
-                        return (
-                            RpcStatusCode::ALREADY_EXISTS,
-                            format!(
-                                "existing volume ID={} doesn't have content source",
-                                ex_vol.vol_id
-                            ),
-                            None,
-                        );
-                    };
-
-                    let volume_source = req.get_volume_content_source();
-                    if let Some(ref volume_source_type) = volume_source.field_type {
-                        match *volume_source_type {
-                            VolumeContentSource_oneof_type::snapshot(ref snapshot_source) => {
-                                let parent_snap_id = snapshot_source.get_snapshot_id();
-                                if let VolumeSource::Snapshot(ref psid) = *ex_vol_content_source {
-                                    if psid != parent_snap_id {
-                                        return (
-                                            RpcStatusCode::ALREADY_EXISTS,
-                                            format!(
-                                                "existing volume ID={} has parent snapshot ID={}, \
-                                                but VolumeContentSource_SnapshotSource has \
-                                                parent snapshot ID={}",
-                                                ex_vol.vol_id, psid, parent_snap_id,
-                                            ),
-                                            None,
-                                        );
-                                    }
-                                } else {
-                                    return (
+                let volume_source = req.get_volume_content_source();
+                if let Some(ref volume_source_type) = volume_source.field_type {
+                    match *volume_source_type {
+                        VolumeContentSource_oneof_type::snapshot(ref snapshot_source) => {
+                            let parent_snap_id = snapshot_source.get_snapshot_id();
+                            if let VolumeSource::Snapshot(ref psid) = *ex_vol_content_source {
+                                if psid != parent_snap_id {
+                                    return Err((
                                         RpcStatusCode::ALREADY_EXISTS,
-                                        format!(
-                                            "existing volume ID={} doesn't have parent snapshot ID",
-                                            ex_vol.vol_id
-                                        ),
-                                        None,
-                                    );
+                                        anyhow!(format!(
+                                            "existing volume ID={} has parent snapshot ID={}, \
+                                            but VolumeContentSource_SnapshotSource has \
+                                            parent snapshot ID={}",
+                                            ex_vol.vol_id, psid, parent_snap_id,
+                                        )),
+                                    ));
                                 }
+                            } else {
+                                return Err((
+                                    RpcStatusCode::ALREADY_EXISTS,
+                                    anyhow!(format!(
+                                        "existing volume ID={} doesn't have parent snapshot ID",
+                                        ex_vol.vol_id
+                                    )),
+                                ));
                             }
-                            VolumeContentSource_oneof_type::volume(ref volume_source) => {
-                                let parent_vol_id = volume_source.get_volume_id();
-                                if let VolumeSource::Volume(ref pvid) = *ex_vol_content_source {
-                                    if pvid != parent_vol_id {
-                                        return (
-                                            RpcStatusCode::ALREADY_EXISTS,
-                                            format!(
-                                                "existing volume ID={} has parent volume ID={}, \
-                                                but VolumeContentSource_VolumeSource has \
-                                                parent volume ID={}",
-                                                ex_vol.vol_id, pvid, parent_vol_id,
-                                            ),
-                                            None,
-                                        );
-                                    }
-                                } else {
-                                    return (
+                        }
+                        VolumeContentSource_oneof_type::volume(ref volume_source) => {
+                            let parent_vol_id = volume_source.get_volume_id();
+                            if let VolumeSource::Volume(ref pvid) = *ex_vol_content_source {
+                                if pvid != parent_vol_id {
+                                    return Err((
                                         RpcStatusCode::ALREADY_EXISTS,
-                                        format!(
-                                            "existing volume ID={} doesn't have parent volume ID",
-                                            ex_vol.vol_id
-                                        ),
-                                        None,
-                                    );
+                                        anyhow!(format!(
+                                            "existing volume ID={} has parent volume ID={}, \
+                                            but VolumeContentSource_VolumeSource has \
+                                            parent volume ID={}",
+                                            ex_vol.vol_id, pvid, parent_vol_id,
+                                        )),
+                                    ));
                                 }
+                            } else {
+                                return Err((
+                                    RpcStatusCode::ALREADY_EXISTS,
+                                    anyhow!(format!(
+                                        "existing volume ID={} doesn't have parent volume ID",
+                                        ex_vol.vol_id,
+                                    )),
+                                ));
                             }
                         }
                     }
                 }
-                // Return existing volume
-                // TODO: make sure that volume still exists?
-                let resp = util::build_create_volume_response(req, &ex_vol.vol_id, &ex_vol.node_id);
-                (RpcStatusCode::OK, "".to_owned(), Some(resp))
             }
-            None => (
-                RpcStatusCode::OK,
-                format!("failed to find volume with name={}", vol_name),
-                None,
-            ),
+            // Return existing volume
+            // TODO: make sure that volume still exists?
+            let resp = util::build_create_volume_response(req, &ex_vol.vol_id, &ex_vol.node_id);
+            Ok(Some(resp))
+        } else {
+            debug!("no volume with name={} exists", vol_name);
+            Ok(None)
         }
     }
 
@@ -184,57 +174,48 @@ impl ControllerImpl {
     fn find_existing_snapshot(
         &self,
         req: &CreateSnapshotRequest,
-    ) -> (RpcStatusCode, String, Option<CreateSnapshotResponse>) {
-        match self.meta_data.get_snapshot_by_name(req.get_name()) {
-            Some(ex_snap) => {
-                // The snapshot with the same name already exists need to check
-                // if the source volume ID of existing snapshot is the same as in new request
-                let snap_name = req.get_name();
-                let src_vol_id = req.get_source_volume_id();
-                let node_id = self.meta_data.get_node_id();
+    ) -> Result<Option<CreateSnapshotResponse>, (RpcStatusCode, anyhow::Error)> {
+        if let Some(ex_snap) = self.meta_data.get_snapshot_by_name(req.get_name()) {
+            // The snapshot with the same name already exists need to check
+            // if the source volume ID of existing snapshot is the same as in new request
+            let snap_name = req.get_name();
+            let src_vol_id = req.get_source_volume_id();
+            let node_id = self.meta_data.get_node_id();
 
-                if ex_snap.vol_id == src_vol_id {
-                    let build_resp_res = util::build_create_snapshot_response(
-                        req,
-                        &ex_snap.snap_id,
-                        &ex_snap.creation_time,
-                        ex_snap.size_bytes,
-                    );
-                    match build_resp_res {
-                        Ok(resp) => {
-                            info!(
-                                "find existing snapshot ID={} and name={}",
-                                ex_snap.snap_id, snap_name,
-                            );
-                            (RpcStatusCode::OK, "".to_owned(), Some(resp))
-                        }
-                        Err(e) => (
-                            RpcStatusCode::INTERNAL,
-                            format!(
-                                "failed to build CreateSnapshotResponse at controller ID={}, \
-                                    the error is: {}",
-                                node_id, e,
-                            ),
-                            None,
-                        ),
+            if ex_snap.vol_id == src_vol_id {
+                let build_resp_res = util::build_create_snapshot_response(
+                    req,
+                    &ex_snap.snap_id,
+                    &ex_snap.creation_time,
+                    ex_snap.size_bytes,
+                )
+                .context(format!(
+                    "failed to build CreateSnapshotResponse at controller ID={}",
+                    node_id,
+                ));
+                match build_resp_res {
+                    Ok(resp) => {
+                        info!(
+                            "find existing snapshot ID={} and name={}",
+                            ex_snap.snap_id, snap_name,
+                        );
+                        Ok(Some(resp))
                     }
-                } else {
-                    (
-                        RpcStatusCode::ALREADY_EXISTS,
-                        format!(
-                            "snapshot with the same name={} exists on node ID={} \
-                                but of different source volume ID",
-                            snap_name, node_id,
-                        ),
-                        None,
-                    )
+                    Err(e) => Err((RpcStatusCode::INTERNAL, e)),
                 }
+            } else {
+                Err((
+                    RpcStatusCode::ALREADY_EXISTS,
+                    anyhow!(format!(
+                        "snapshot with the same name={} exists on node ID={} \
+                            but of different source volume ID",
+                        snap_name, node_id,
+                    )),
+                ))
             }
-            None => (
-                RpcStatusCode::OK,
-                format!("no snapshot with name={} exists", req.get_name()),
-                None,
-            ),
+        } else {
+            debug!("no snapshot with name={} exists", req.get_name());
+            Ok(None)
         }
     }
 
@@ -263,39 +244,44 @@ impl ControllerImpl {
     fn worker_create_volume(
         &self,
         req: &CreateVolumeRequest,
-    ) -> Result<CreateVolumeResponse, (RpcStatusCode, String)> {
+    ) -> Result<CreateVolumeResponse, (RpcStatusCode, anyhow::Error)> {
         let topology_requirement = if req.has_accessibility_requirements() {
             Some(req.get_accessibility_requirements())
         } else {
             None
         };
-        let worker_node = match self.meta_data.select_node(topology_requirement) {
+        let select_res = self
+            .meta_data
+            .select_node(topology_requirement)
+            .context("failed to select a node");
+        let worker_node = match select_res {
             Ok(n) => n,
             Err(e) => {
-                error!("failed to select a node, the error is: {}", e);
-                return Err((
-                    RpcStatusCode::INTERNAL,
-                    format!("failed to select a node, the error is: {}", e,),
-                ));
+                error!(
+                    "failed to select a node, the error is: {}",
+                    util::format_anyhow_error(&e),
+                );
+                return Err((RpcStatusCode::INTERNAL, e));
             }
         };
         let client = MetaData::build_worker_client(&worker_node);
         let create_res = client.worker_create_volume(req);
         match create_res {
             Ok(resp) => Ok(resp),
-            Err(err) => {
-                let (rsc, msg) = match err {
-                    grpcio::Error::RpcFailure(s) => (
+            Err(e) => {
+                match e {
+                    grpcio::Error::RpcFailure(ref s) => Err((
                         s.status,
-                        if let Some(m) = s.details {
-                            m
-                        } else {
-                            format!(
-                                "failed to create volume by worker at {}",
-                                worker_node.node_id,
-                            )
-                        },
-                    ),
+                        anyhow::Error::new(e),
+                        // if let Some(m) = s.details {
+                        //     m
+                        // } else {
+                        //     format!(
+                        //         "failed to create volume by worker at {}",
+                        //         worker_node.node_id,
+                        //     )
+                        // },
+                    )),
                     e @ grpcio::Error::Codec(..)
                     | e @ grpcio::Error::CallFailure(..)
                     | e @ grpcio::Error::RpcFinished(..)
@@ -304,14 +290,81 @@ impl ControllerImpl {
                     | e @ grpcio::Error::BindFail(..)
                     | e @ grpcio::Error::QueueShutdown
                     | e @ grpcio::Error::GoogleAuthenticationFailed
-                    | e @ grpcio::Error::InvalidMetadata(..) => (
+                    | e @ grpcio::Error::InvalidMetadata(..) => Err((
                         RpcStatusCode::INTERNAL,
-                        format!("failed to create volume, the error is: {}", e),
-                    ),
-                };
-                Err((rsc, msg))
+                        anyhow::Error::new(e),
+                        // format!("failed to create volume, the error is: {}", e),
+                    )),
+                }
             }
         }
+    }
+
+    /// The pre-check helper function for `create_volume`
+    fn create_volume_pre_check(
+        &self,
+        req: &CreateVolumeRequest,
+    ) -> Result<(), (RpcStatusCode, anyhow::Error)> {
+        let rpc_type = ControllerServiceCapability_RPC_Type::CREATE_DELETE_VOLUME;
+        if !self.validate_request_capability(rpc_type) {
+            return Err((
+                RpcStatusCode::INVALID_ARGUMENT,
+                anyhow!(format!("unsupported capability {:?}", rpc_type)),
+            ));
+        }
+
+        let vol_name = req.get_name();
+        if vol_name.is_empty() {
+            return Err((
+                RpcStatusCode::INVALID_ARGUMENT,
+                anyhow!("name missing in request"),
+            ));
+        }
+
+        let req_caps = req.get_volume_capabilities();
+        if req_caps.is_empty() {
+            return Err((
+                RpcStatusCode::INVALID_ARGUMENT,
+                anyhow!("volume capabilities missing in request"),
+            ));
+        }
+
+        let access_type_block = req_caps.iter().any(VolumeCapability::has_block);
+        let access_mode_multi_writer = req_caps.iter().any(|vc| {
+            let vol_access_mode = vc.get_access_mode().get_mode();
+            vol_access_mode == VolumeCapability_AccessMode_Mode::MULTI_NODE_READER_ONLY
+                || vol_access_mode == VolumeCapability_AccessMode_Mode::MULTI_NODE_MULTI_WRITER
+                || vol_access_mode == VolumeCapability_AccessMode_Mode::MULTI_NODE_SINGLE_WRITER
+        });
+        if access_type_block {
+            return Err((
+                RpcStatusCode::INVALID_ARGUMENT,
+                anyhow!("access type block not supported"),
+            ));
+        }
+        if access_mode_multi_writer {
+            return Err((
+                RpcStatusCode::INVALID_ARGUMENT,
+                anyhow!(
+                    "access mode MULTI_NODE_SINGLE_WRITER and \
+                        MULTI_NODE_MULTI_WRITER not supported"
+                ),
+            ));
+        }
+
+        let volume_size = req.get_capacity_range().get_required_bytes();
+        if volume_size > util::MAX_VOLUME_STORAGE_CAPACITY {
+            return Err((
+                RpcStatusCode::OUT_OF_RANGE,
+                anyhow!(format!(
+                    "requested size {} exceeds maximum allowed {}",
+                    volume_size,
+                    util::MAX_VOLUME_STORAGE_CAPACITY,
+                )),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -323,102 +376,118 @@ impl Controller for ControllerImpl {
         sink: UnarySink<CreateVolumeResponse>,
     ) {
         debug!("create_volume request: {:?}", req);
-        let rpc_type = ControllerServiceCapability_RPC_Type::CREATE_DELETE_VOLUME;
-        if !self.validate_request_capability(rpc_type) {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INVALID_ARGUMENT,
-                format!("unsupported capability {:?}", rpc_type),
-            );
-        }
 
+        if let Err((rpc_status_code, e)) = self.create_volume_pre_check(&req) {
+            return util::fail(&ctx, sink, rpc_status_code, &e);
+        }
+        // let rpc_type = ControllerServiceCapability_RPC_Type::CREATE_DELETE_VOLUME;
+        // if !self.validate_request_capability(rpc_type) {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::INVALID_ARGUMENT,
+        //         anyhow!(format!("unsupported capability {:?}", rpc_type)),
+        //     );
+        // }
+
+        // let vol_name = req.get_name();
+        // if vol_name.is_empty() {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::INVALID_ARGUMENT,
+        //         anyhow!("name missing in request"),
+        //     );
+        // }
+
+        // let req_caps = req.get_volume_capabilities();
+        // if req_caps.is_empty() {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::INVALID_ARGUMENT,
+        //         anyhow!("volume capabilities missing in request"),
+        //     );
+        // }
+
+        // let access_type_block = req_caps.iter().any(VolumeCapability::has_block);
+        // let access_mode_multi_writer = req_caps.iter().any(|vc| {
+        //     vc.get_access_mode().get_mode()
+        //         == VolumeCapability_AccessMode_Mode::MULTI_NODE_MULTI_WRITER
+        //         || vc.get_access_mode().get_mode()
+        //             == VolumeCapability_AccessMode_Mode::MULTI_NODE_SINGLE_WRITER
+        // });
+        // if access_type_block {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::INVALID_ARGUMENT,
+        //         anyhow!("access type block not supported"),
+        //     );
+        // }
+        // if access_mode_multi_writer {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::INVALID_ARGUMENT,
+        //         anyhow!(
+        //             "access mode MULTI_NODE_SINGLE_WRITER and \
+        //                 MULTI_NODE_MULTI_WRITER not supported"
+        //         ),
+        //     );
+        // }
+
+        // let volume_size = req.get_capacity_range().get_required_bytes();
+        // if volume_size > util::MAX_VOLUME_STORAGE_CAPACITY {
+        //     return util::fail(
+        //         &ctx,
+        //         sink,
+        //         RpcStatusCode::OUT_OF_RANGE,
+        //         anyhow!(format!(
+        //             "requested size {} exceeds maximum allowed {}",
+        //             volume_size,
+        //             util::MAX_VOLUME_STORAGE_CAPACITY,
+        //         )),
+        //     );
+        // }
         let vol_name = req.get_name();
-        if vol_name.is_empty() {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INVALID_ARGUMENT,
-                "name missing in request".to_owned(),
-            );
-        }
-
-        let req_caps = req.get_volume_capabilities();
-        if req_caps.is_empty() {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INVALID_ARGUMENT,
-                "volume capabilities missing in request".to_owned(),
-            );
-        }
-
-        let access_type_block = req_caps.iter().any(VolumeCapability::has_block);
-        let access_mode_multi_writer = req_caps.iter().any(|vc| {
-            vc.get_access_mode().get_mode()
-                == VolumeCapability_AccessMode_Mode::MULTI_NODE_MULTI_WRITER
-                || vc.get_access_mode().get_mode()
-                    == VolumeCapability_AccessMode_Mode::MULTI_NODE_SINGLE_WRITER
-        });
-        if access_type_block {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INVALID_ARGUMENT,
-                "access type block not supported".to_owned(),
-            );
-        }
-        if access_mode_multi_writer {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INVALID_ARGUMENT,
-                "access mode MULTI_NODE_SINGLE_WRITER and \
-                        MULTI_NODE_MULTI_WRITER not supported"
-                    .to_owned(),
-            );
-        }
-
-        let volume_size = req.get_capacity_range().get_required_bytes();
-        if volume_size > util::MAX_VOLUME_STORAGE_CAPACITY {
-            return util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::OUT_OF_RANGE,
-                format!(
-                    "requested size {} exceeds maximum allowed {}",
-                    volume_size,
-                    util::MAX_VOLUME_STORAGE_CAPACITY
-                ),
-            );
-        }
-        let (rpc_status_code, err_msg, resp_opt) = self.find_existing_volume(&req);
-        if RpcStatusCode::OK == rpc_status_code {
-            if let Some(resp) = resp_opt {
-                debug!(
-                    "found existing volume ID={} and name={}",
-                    resp.get_volume().get_volume_id(),
-                    vol_name,
-                );
-                return util::success(&ctx, sink, resp);
-            } else {
-                debug!("{}", err_msg);
+        let find_res = self.find_existing_volume(&req);
+        match find_res {
+            Ok(resp_opt) => {
+                if let Some(resp) = resp_opt {
+                    debug!(
+                        "found existing volume ID={} and name={}",
+                        resp.get_volume().get_volume_id(),
+                        vol_name,
+                    );
+                    return util::success(&ctx, sink, resp);
+                } else {
+                    debug!("no volume name={} found", vol_name);
+                }
             }
-        } else {
-            debug!("{}", err_msg);
-            return util::fail(&ctx, sink, rpc_status_code, err_msg);
+            Err((rpc_status_code, e)) => {
+                debug!(
+                    "failed to find existing volume name={}, the error is: {}",
+                    vol_name,
+                    util::format_anyhow_error(&e),
+                );
+                return util::fail(&ctx, sink, rpc_status_code, &e);
+            }
         }
 
         match self.worker_create_volume(&req) {
             Ok(resp) => util::success(&ctx, sink, resp),
-            Err((rpc_status_code, err_msg)) => {
+            Err((rpc_status_code, e)) => {
                 debug_assert_ne!(
                     rpc_status_code,
                     RpcStatusCode::OK,
                     "the RpcStatusCode should not be OK when error",
                 );
-                debug!("{}", err_msg);
-                util::fail(&ctx, sink, rpc_status_code, err_msg)
+                debug!(
+                    "failed to create volume, the error is: {}",
+                    util::format_anyhow_error(&e)
+                );
+                util::fail(&ctx, sink, rpc_status_code, &e)
             }
         }
     }
@@ -438,7 +507,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume ID missing in request".to_owned(),
+                &anyhow!("volume ID missing in request"),
             );
         }
 
@@ -448,7 +517,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("unsupported capability {:?}", rpc_type),
+                &anyhow!(format!("unsupported capability {:?}", rpc_type)),
             );
         }
 
@@ -458,13 +527,18 @@ impl Controller for ControllerImpl {
             let node_res = self.meta_data.get_node_by_id(&vol.node_id);
             if let Some(node) = node_res {
                 let client = MetaData::build_worker_client(&node);
-                let worker_delete_res = client.worker_delete_volume(&req);
+                let worker_delete_res = client.worker_delete_volume(&req).context(format!(
+                    "failed to delete volume ID={} on node ID={}",
+                    vol_id, vol.node_id,
+                ));
                 match worker_delete_res {
                     Ok(_) => info!("successfully deleted volume ID={}", vol_id),
                     Err(e) => {
                         warn!(
                             "failed to delete volume ID={} on node ID={}, the error is: {}",
-                            vol_id, vol.node_id, e,
+                            vol_id,
+                            vol.node_id,
+                            util::format_anyhow_error(&e),
                         );
                     }
                 }
@@ -490,7 +564,12 @@ impl Controller for ControllerImpl {
     ) {
         debug!("controller_publish_volume request: {:?}", req);
 
-        util::fail(&ctx, sink, RpcStatusCode::UNIMPLEMENTED, "".to_owned())
+        util::fail(
+            &ctx,
+            sink,
+            RpcStatusCode::UNIMPLEMENTED,
+            &anyhow!("unimplemented"),
+        )
     }
 
     fn controller_unpublish_volume(
@@ -501,7 +580,12 @@ impl Controller for ControllerImpl {
     ) {
         debug!("controller_unpublish_volume request: {:?}", req);
 
-        util::fail(&ctx, sink, RpcStatusCode::UNIMPLEMENTED, "".to_owned())
+        util::fail(
+            &ctx,
+            sink,
+            RpcStatusCode::UNIMPLEMENTED,
+            &anyhow!("unimplemented"),
+        )
     }
 
     fn validate_volume_capabilities(
@@ -519,7 +603,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume ID cannot be empty".to_owned(),
+                &anyhow!("volume ID cannot be empty"),
             );
         }
         let vol_caps = req.get_volume_capabilities();
@@ -528,7 +612,10 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("volume ID={} has no volume capabilities in reqeust", vol_id),
+                &anyhow!(format!(
+                    "volume ID={} has no volume capabilities in reqeust",
+                    vol_id,
+                )),
             );
         }
 
@@ -538,7 +625,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::NOT_FOUND,
-                format!("failed to find volume ID={}", vol_id),
+                &anyhow!(format!("failed to find volume ID={}", vol_id)),
             );
         }
 
@@ -548,7 +635,7 @@ impl Controller for ControllerImpl {
                     &ctx,
                     sink,
                     RpcStatusCode::INVALID_ARGUMENT,
-                    "cannot have neither mount nor block access type undefined".to_owned(),
+                    &anyhow!("cannot have neither mount nor block access type undefined"),
                 );
             }
             if cap.has_block() {
@@ -556,7 +643,7 @@ impl Controller for ControllerImpl {
                     &ctx,
                     sink,
                     RpcStatusCode::INVALID_ARGUMENT,
-                    "access type block is not supported".to_owned(),
+                    &anyhow!("access type block is not supported"),
                 );
             }
             // TODO: a real driver would check the capabilities of the given volume with
@@ -587,15 +674,16 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("unsupported capability {:?}", rpc_type),
+                &anyhow!(format!("unsupported capability {:?}", rpc_type)),
             );
         }
 
         let max_entries = req.get_max_entries();
         let starting_token = req.get_starting_token();
-        let (vol_vec, next_pos) = match self.meta_data.list_volumes(starting_token, max_entries) {
+        let list_res = self.meta_data.list_volumes(starting_token, max_entries);
+        let (vol_vec, next_pos) = match list_res {
             Ok((vol_vec, next_pos)) => (vol_vec, next_pos),
-            Err((rpc_status_code, err_msg)) => {
+            Err((rpc_status_code, e)) => {
                 debug_assert_ne!(
                     rpc_status_code,
                     RpcStatusCode::OK,
@@ -604,9 +692,11 @@ impl Controller for ControllerImpl {
                 warn!(
                     "failed to list volumes from starting position={} and \
                         max entries={}, the error is: {}",
-                    starting_token, max_entries, err_msg,
+                    starting_token,
+                    max_entries,
+                    util::format_anyhow_error(&e),
                 );
-                return util::fail(&ctx, sink, rpc_status_code, err_msg);
+                return util::fail(&ctx, sink, rpc_status_code, &e);
             }
         };
         let list_size = vol_vec.len();
@@ -625,7 +715,12 @@ impl Controller for ControllerImpl {
     ) {
         debug!("get_capacity request: {:?}", req);
 
-        util::fail(&ctx, sink, RpcStatusCode::UNIMPLEMENTED, "".to_owned())
+        util::fail(
+            &ctx,
+            sink,
+            RpcStatusCode::UNIMPLEMENTED,
+            &anyhow!("unimplemented"),
+        )
     }
 
     fn controller_get_capabilities(
@@ -655,7 +750,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("unsupported capability {:?}", rpc_type,),
+                &anyhow!(format!("unsupported capability {:?}", rpc_type)),
             );
         }
 
@@ -665,7 +760,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "name missing in request".to_owned(),
+                &anyhow!("name missing in request"),
             );
         }
         // Check source volume exists
@@ -675,25 +770,32 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "source volume ID missing in request".to_owned(),
+                &anyhow!("source volume ID missing in request"),
             );
         }
 
-        let (rpc_status_code, err_msg, resp_opt) = self.find_existing_snapshot(&req);
-        if RpcStatusCode::OK == rpc_status_code {
-            if let Some(resp) = resp_opt {
-                info!(
-                    "find existing snapshot ID={} and name={}",
-                    resp.get_snapshot().get_snapshot_id(),
-                    snap_name,
-                );
-                return util::success(&ctx, sink, resp);
-            } else {
-                debug!("{}", err_msg);
+        let find_res = self.find_existing_snapshot(&req);
+        match find_res {
+            Ok(resp_opt) => {
+                if let Some(resp) = resp_opt {
+                    info!(
+                        "find existing snapshot ID={} and name={}",
+                        resp.get_snapshot().get_snapshot_id(),
+                        snap_name,
+                    );
+                    return util::success(&ctx, sink, resp);
+                } else {
+                    debug!("no snapshot name={} found", snap_name);
+                }
             }
-        } else {
-            debug!("{}", err_msg);
-            return util::fail(&ctx, sink, rpc_status_code, err_msg);
+            Err((rpc_status_code, e)) => {
+                debug!(
+                    "failed to find existing snapshot name={}, the error is: {}",
+                    snap_name,
+                    util::format_anyhow_error(&e),
+                );
+                return util::fail(&ctx, sink, rpc_status_code, &e);
+            }
         }
 
         match self.meta_data.get_volume_by_id(src_vol_id) {
@@ -701,15 +803,13 @@ impl Controller for ControllerImpl {
                 let node_res = self.meta_data.get_node_by_id(&src_vol.node_id);
                 if let Some(node) = node_res {
                     let client = MetaData::build_worker_client(&node);
-                    let create_res = client.worker_create_snapshot(&req);
+                    let create_res = client.worker_create_snapshot(&req).context(format!(
+                        "failed to create snapshot name={} on node ID={}",
+                        snap_name, src_vol.node_id,
+                    ));
                     match create_res {
                         Ok(r) => util::success(&ctx, sink, r),
-                        Err(e) => util::fail(
-                            &ctx,
-                            sink,
-                            RpcStatusCode::INTERNAL,
-                            format!("failed to create snapshot, the error is: {}", e),
-                        ),
+                        Err(e) => util::fail(&ctx, sink, RpcStatusCode::INTERNAL, &e),
                     }
                 } else {
                     warn!("failed to find node ID={} from etcd", src_vol.node_id);
@@ -719,7 +819,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INTERNAL,
-                format!("failed to find source volume ID={}", src_vol_id),
+                &anyhow!(format!("failed to find source volume ID={}", src_vol_id)),
             ),
         }
     }
@@ -739,7 +839,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "snapshot ID missing in request".to_owned(),
+                &anyhow!("snapshot ID missing in request"),
             );
         }
 
@@ -749,7 +849,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("unsupported capability {:?}", rpc_type),
+                &anyhow!(format!("unsupported capability {:?}", rpc_type)),
             );
         }
 
@@ -759,13 +859,18 @@ impl Controller for ControllerImpl {
             let node_res = self.meta_data.get_node_by_id(&snap.node_id);
             if let Some(node) = node_res {
                 let client = MetaData::build_worker_client(&node);
-                let worker_delete_res = client.worker_delete_snapshot(&req);
+                let worker_delete_res = client.worker_delete_snapshot(&req).context(format!(
+                    "failed to delete snapshot ID={} on node ID={}",
+                    snap_id, snap.node_id,
+                ));
                 match worker_delete_res {
                     Ok(_r) => info!("successfully deleted sanpshot ID={}", snap_id),
                     Err(e) => {
                         error!(
                             "failed to delete snapshot ID={} on node ID={}, the error is: {}",
-                            snap_id, snap.node_id, e,
+                            snap_id,
+                            snap.node_id,
+                            util::format_anyhow_error(&e),
                         );
                     }
                 }
@@ -794,7 +899,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                format!("unsupported capability {:?}", rpc_type),
+                &anyhow!(format!("unsupported capability {:?}", rpc_type)),
             );
         }
 
@@ -803,18 +908,12 @@ impl Controller for ControllerImpl {
         if !snap_id.is_empty() {
             let snap_res = self.meta_data.get_snapshot_by_id(snap_id);
             if let Some(snap) = snap_res {
-                let r = match Self::add_snapshot_to_list_response(&snap) {
+                let add_res = Self::add_snapshot_to_list_response(&snap)
+                    .context("failed to generate ListSnapshotsResponse");
+                let r = match add_res {
                     Ok(resp) => resp,
                     Err(e) => {
-                        return util::fail(
-                            &ctx,
-                            sink,
-                            RpcStatusCode::INTERNAL,
-                            format!(
-                                "failed to generate ListSnapshotsResponse, the error is: {}",
-                                e,
-                            ),
-                        );
+                        return util::fail(&ctx, sink, RpcStatusCode::INTERNAL, &e);
                     }
                 };
 
@@ -831,18 +930,12 @@ impl Controller for ControllerImpl {
         if !src_volume_id.is_empty() {
             let snap_res = self.meta_data.get_snapshot_by_src_volume_id(src_volume_id);
             if let Some(snap) = snap_res {
-                let r = match Self::add_snapshot_to_list_response(&snap) {
+                let add_res = Self::add_snapshot_to_list_response(&snap)
+                    .context("failed to generate ListSnapshotsResponse");
+                let r = match add_res {
                     Ok(resp) => resp,
                     Err(e) => {
-                        return util::fail(
-                            &ctx,
-                            sink,
-                            RpcStatusCode::INTERNAL,
-                            format!(
-                                "failed to generate ListSnapshotsResponse, the error is: {}",
-                                e,
-                            ),
-                        );
+                        return util::fail(&ctx, sink, RpcStatusCode::INTERNAL, &e);
                     }
                 };
 
@@ -860,10 +953,10 @@ impl Controller for ControllerImpl {
         // case 3: no parameter is set, so return all the snapshots
         let max_entries = req.get_max_entries();
         let starting_token = req.get_starting_token();
-        let (snap_vec, next_pos) = match self.meta_data.list_snapshots(starting_token, max_entries)
-        {
+        let list_res = self.meta_data.list_snapshots(starting_token, max_entries);
+        let (snap_vec, next_pos) = match list_res {
             Ok((snap_vec, next_pos)) => (snap_vec, next_pos),
-            Err((rpc_status_code, err_msg)) => {
+            Err((rpc_status_code, e)) => {
                 debug_assert_ne!(
                     rpc_status_code,
                     RpcStatusCode::OK,
@@ -872,9 +965,11 @@ impl Controller for ControllerImpl {
                 warn!(
                     "failed to list snapshots from starting position={}, \
                         max entries={}, the error is: {}",
-                    starting_token, max_entries, err_msg,
+                    starting_token,
+                    max_entries,
+                    util::format_anyhow_error(&e),
                 );
-                return util::fail(&ctx, sink, rpc_status_code, err_msg);
+                return util::fail(&ctx, sink, rpc_status_code, &e);
             }
         };
 
@@ -898,7 +993,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "volume ID not provided".to_owned(),
+                &anyhow!("volume ID not provided"),
             );
         }
 
@@ -907,7 +1002,7 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::INVALID_ARGUMENT,
-                "capacity range not provided".to_owned(),
+                &anyhow!("capacity range not provided"),
             );
         }
         let cap_range = req.get_capacity_range();
@@ -917,11 +1012,11 @@ impl Controller for ControllerImpl {
                 &ctx,
                 sink,
                 RpcStatusCode::OUT_OF_RANGE,
-                format!(
+                &anyhow!(format!(
                     "requested capacity {} exceeds maximum allowed {}",
                     capacity,
                     util::MAX_VOLUME_STORAGE_CAPACITY,
-                ),
+                )),
             );
         }
 
@@ -934,7 +1029,7 @@ impl Controller for ControllerImpl {
                 sink,
                 // Assume not found error
                 RpcStatusCode::NOT_FOUND,
-                format!("failed to find volume ID={}", vol_id),
+                &anyhow!(format!("failed to find volume ID={}", vol_id)),
             );
         };
 
@@ -942,14 +1037,18 @@ impl Controller for ControllerImpl {
             Ordering::Less => {
                 let expand_res = self.meta_data.expand(&mut ex_vol, capacity);
                 if let Err(e) = expand_res {
-                    panic!("failed to expand volume ID={}, the error is: {}", vol_id, e,);
+                    panic!(
+                        "failed to expand volume ID={}, the error is: {}",
+                        vol_id,
+                        util::format_anyhow_error(&e),
+                    );
                 }
             }
             Ordering::Greater => {
-                return util::fail(&ctx, sink, RpcStatusCode::INVALID_ARGUMENT, format!(
+                return util::fail(&ctx, sink, RpcStatusCode::INVALID_ARGUMENT, &anyhow!(format!(
                         "capacity={} to expand in request is smaller than the size={} of volume ID={}",
                         capacity, ex_vol.get_size(), vol_id,
-                    ),);
+                    )));
             }
             Ordering::Equal => {
                 debug!("capacity equals to volume size, no need to expand");
@@ -970,6 +1069,11 @@ impl Controller for ControllerImpl {
     ) {
         debug!("controller_get_volume request: {:?}", req);
 
-        util::fail(&ctx, sink, RpcStatusCode::UNIMPLEMENTED, "".to_owned())
+        util::fail(
+            &ctx,
+            sink,
+            RpcStatusCode::UNIMPLEMENTED,
+            &anyhow!("unimplemented"),
+        )
     }
 }

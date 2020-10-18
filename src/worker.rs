@@ -1,7 +1,8 @@
 //! The implementation for `DatenLord` worker service
 
+use anyhow::Context;
 use grpcio::{RpcContext, RpcStatusCode, UnarySink};
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -32,62 +33,55 @@ impl WorkerImpl {
         vol_name: &str,
         vol_size: i64,
         content_source: &VolumeSource,
-    ) -> (RpcStatusCode, String) {
+    ) -> Result<(), (RpcStatusCode, anyhow::Error)> {
         match *content_source {
             VolumeSource::Snapshot(ref source_snapshot_id) => {
-                let (rpc_status_code, msg) = self.meta_data.copy_volume_from_snapshot(
-                    vol_size,
+                self.meta_data
+                    .copy_volume_from_snapshot(vol_size, source_snapshot_id, &vol_id.to_string())
+                    .map_err(|(rsc, anyhow_err)| {
+                        (
+                            rsc,
+                            anyhow_err.context(format!(
+                                "failed to populate volume ID={} and name={} from source snapshot ID={}",
+                                vol_id, vol_name, source_snapshot_id,
+                            )),
+                        )
+                    })?;
+                info!(
+                    "successfully populated volume ID={} and name={} \
+                        from source snapshot ID={} on node ID={}",
+                    vol_id,
+                    vol_name,
                     source_snapshot_id,
-                    &vol_id.to_string(),
+                    self.meta_data.get_node_id(),
                 );
-                if RpcStatusCode::OK == rpc_status_code {
-                    info!(
-                        "successfully populated volume ID={} and name={} \
-                            from source snapshot ID={} on node ID={}",
-                        vol_id,
-                        vol_name,
-                        source_snapshot_id,
-                        self.meta_data.get_node_id(),
-                    );
-                    (RpcStatusCode::OK, "".to_owned())
-                } else {
-                    warn!(
-                        "failed to populate volume ID={} and name={} from source snapshot ID={}, \
-                            the error is: {}",
-                        vol_id, vol_name, source_snapshot_id, msg,
-                    );
-                    (rpc_status_code, msg)
-                }
+                Ok(())
             }
             VolumeSource::Volume(ref source_volume_id) => {
-                let (rpc_status_code, msg) = self.meta_data.copy_volume_from_volume(
-                    vol_size,
+                self.meta_data
+                    .copy_volume_from_volume(vol_size, source_volume_id, &vol_id.to_string())
+                    .map_err(|(rsc, anyhow_err)| {
+                        (
+                            rsc,
+                            anyhow_err.context(format!(
+                                "failed to populate volume ID={} and name={} \
+                                    from source volume ID={} on node ID={}",
+                                vol_id,
+                                vol_name,
+                                source_volume_id,
+                                self.meta_data.get_node_id(),
+                            )),
+                        )
+                    })?;
+                info!(
+                    "successfully populated volume ID={} and name={} \
+                        from source volume ID={} on node ID={}",
+                    vol_id,
+                    vol_name,
                     source_volume_id,
-                    &vol_id.to_string(),
+                    self.meta_data.get_node_id(),
                 );
-                if let RpcStatusCode::OK = rpc_status_code {
-                    info!(
-                        "successfully populated volume ID={} and name={} \
-                            from source volume ID={} on node ID={}",
-                        vol_id,
-                        vol_name,
-                        source_volume_id,
-                        self.meta_data.get_node_id(),
-                    );
-                    (RpcStatusCode::OK, "".to_owned())
-                } else {
-                    warn!(
-                        "failed to populate volume ID={} and name={} \
-                            from source volume ID={} on node ID={} \
-                            the error is: {}",
-                        vol_id,
-                        vol_name,
-                        source_volume_id,
-                        self.meta_data.get_node_id(),
-                        msg,
-                    );
-                    (rpc_status_code, msg)
-                }
+                Ok(())
             }
         }
     }
@@ -112,35 +106,35 @@ impl Worker for WorkerImpl {
             &vol_id_str,
             self.meta_data.get_node_id(),
             &self.meta_data.get_volume_path(&vol_id_str),
-        );
+        )
+        .context(format!(
+            "failed to create volume ID={} and name={} on node ID={}",
+            vol_id,
+            vol_name,
+            self.meta_data.get_node_id(),
+        ));
         let volume = match vol_res {
             Ok(v) => v,
             Err(e) => {
-                return util::fail(
-                    &ctx,
-                    sink,
-                    RpcStatusCode::INTERNAL,
-                    format!(
-                        "failed to create volume ID={} and name={} on node ID={}, \
-                                the errir is: {}",
-                        vol_id,
-                        vol_name,
-                        self.meta_data.get_node_id(),
-                        e,
-                    ),
-                );
+                return util::fail(&ctx, sink, RpcStatusCode::INTERNAL, &e);
             }
         };
 
         if let Some(ref content_source) = volume.content_source {
-            let (rpc_status_code, err_msg) =
-                self.build_volume_from_source(&vol_id_str, vol_name, vol_size, content_source);
-            if RpcStatusCode::OK != rpc_status_code {
+            let build_res = self
+                .build_volume_from_source(&vol_id_str, vol_name, vol_size, content_source)
+                .map_err(|(rsc, anyhow_err)| {
+                    (
+                        rsc,
+                        anyhow_err.context("failed to create volume from source"),
+                    )
+                });
+            if let Err((rpc_status_code, e)) = build_res {
                 debug!(
                     "failed to create volume from source, the error is: {}",
-                    err_msg,
+                    util::format_anyhow_error(&e),
                 );
-                return util::fail(&ctx, sink, rpc_status_code, err_msg);
+                return util::fail(&ctx, sink, rpc_status_code, &e);
             }
         }
 
@@ -175,7 +169,14 @@ impl Worker for WorkerImpl {
         debug!("worker delete_volume request: {:?}", req);
 
         let vol_id = req.get_volume_id();
-        let delete_res = self.meta_data.delete_volume_meta_data(vol_id);
+        let delete_res = self
+            .meta_data
+            .delete_volume_meta_data(vol_id)
+            .context(format!(
+                "failed to find the volume ID={} to delete on node ID={}",
+                vol_id,
+                self.meta_data.get_node_id(),
+            ));
         match delete_res {
             Ok(volume) => {
                 let del_res = volume.delete_directory();
@@ -184,7 +185,7 @@ impl Worker for WorkerImpl {
                         "failed to delete volume ID={} directory on node ID={}, the error is: {}",
                         vol_id,
                         self.meta_data.get_node_id(),
-                        e,
+                        util::format_anyhow_error(&e),
                     );
                 }
                 debug!(
@@ -196,17 +197,7 @@ impl Worker for WorkerImpl {
                 util::success(&ctx, sink, r);
             }
             Err(e) => {
-                util::fail(
-                    &ctx,
-                    sink,
-                    RpcStatusCode::NOT_FOUND,
-                    format!(
-                        "failed to find the volume ID={} to delete on node ID={}, the error is: {}",
-                        vol_id,
-                        self.meta_data.get_node_id(),
-                        e,
-                    ),
-                );
+                util::fail(&ctx, sink, RpcStatusCode::NOT_FOUND, &e);
             }
         }
     }
@@ -225,9 +216,13 @@ impl Worker for WorkerImpl {
         let src_volume_id = req.get_source_volume_id();
         let node_id = self.meta_data.get_node_id();
 
-        let build_snap_res =
-            self.meta_data
-                .build_snapshot_from_volume(src_volume_id, &snap_id_str, snap_name);
+        let build_snap_res = self
+            .meta_data
+            .build_snapshot_from_volume(src_volume_id, &snap_id_str, snap_name)
+            .context(format!(
+                "failed to create snapshot ID={} on node ID={}",
+                snap_id_str, node_id,
+            ));
         match build_snap_res {
             Ok(snapshot) => {
                 let build_resp_res = util::build_create_snapshot_response(
@@ -235,7 +230,11 @@ impl Worker for WorkerImpl {
                     &snap_id_str,
                     &snapshot.creation_time,
                     snapshot.size_bytes,
-                );
+                )
+                .context(format!(
+                    "failed to build CreateSnapshotResponse on node ID={}",
+                    node_id,
+                ));
                 match build_resp_res {
                     Ok(r) => {
                         let add_res = self
@@ -255,27 +254,10 @@ impl Worker for WorkerImpl {
                         );
                         util::success(&ctx, sink, r)
                     }
-                    Err(e) => util::fail(
-                        &ctx,
-                        sink,
-                        RpcStatusCode::INTERNAL,
-                        format!(
-                            "failed to build CreateSnapshotResponse on node ID={}, \
-                                the error is: {}",
-                            node_id, e,
-                        ),
-                    ),
+                    Err(e) => util::fail(&ctx, sink, RpcStatusCode::INTERNAL, &e),
                 }
             }
-            Err(e) => util::fail(
-                &ctx,
-                sink,
-                RpcStatusCode::INTERNAL,
-                format!(
-                    "failed to create snapshot ID={} on node ID={}, the error is: {}",
-                    snap_id_str, node_id, e,
-                ),
-            ),
+            Err(e) => util::fail(&ctx, sink, RpcStatusCode::INTERNAL, &e),
         }
     }
 
@@ -287,7 +269,14 @@ impl Worker for WorkerImpl {
     ) {
         debug!("worker delete_snapshot request: {:?}", req);
         let snap_id = req.get_snapshot_id();
-        let delete_res = self.meta_data.delete_snapshot_meta_data(snap_id);
+        let delete_res = self
+            .meta_data
+            .delete_snapshot_meta_data(snap_id)
+            .context(format!(
+                "failed to find the snapshot ID={} to delete on node ID={}",
+                snap_id,
+                self.meta_data.get_node_id(),
+            ));
         match delete_res {
             Ok(snapshot) => {
                 let del_res = snapshot.delete_file();
@@ -296,7 +285,7 @@ impl Worker for WorkerImpl {
                         "failed to delete snapshot ID={} file on node ID={}, the error is: {}",
                         snap_id,
                         self.meta_data.get_node_id(),
-                        e,
+                        util::format_anyhow_error(&e),
                     );
                 }
                 debug!(
@@ -308,17 +297,7 @@ impl Worker for WorkerImpl {
                 util::success(&ctx, sink, r);
             }
             Err(e) => {
-                util::fail(
-                    &ctx,
-                    sink,
-                    RpcStatusCode::NOT_FOUND,
-                    format!(
-                        "failed to find the snapshot ID={} to delete on node ID={}, the error is: {}",
-                        snap_id,
-                        self.meta_data.get_node_id(),
-                        e,
-                    ),
-                );
+                util::fail(&ctx, sink, RpcStatusCode::NOT_FOUND, &e);
             }
         }
     }

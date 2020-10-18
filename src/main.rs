@@ -768,7 +768,10 @@ mod test {
                 etcd_client,
             ) {
                 Ok(md) => md,
-                Err(e) => panic!("failed to build meta data, the error is : {}", e,),
+                Err(e) => panic!(
+                    "failed to build meta data, the error is : {}",
+                    util::format_anyhow_error(&e),
+                ),
             };
             let md = Arc::new(meta_data);
             let controller_server = match build_grpc_controller_server(
@@ -777,7 +780,10 @@ mod test {
                 Arc::<MetaData>::clone(&md),
             ) {
                 Ok(server) => server,
-                Err(e) => panic!("failed to build CSI server, the error is : {}", e,),
+                Err(e) => panic!(
+                    "failed to build CSI server, the error is : {}",
+                    util::format_anyhow_error(&e),
+                ),
             };
             let node_server = match build_grpc_node_server(
                 &node_end_point,
@@ -785,11 +791,17 @@ mod test {
                 Arc::<MetaData>::clone(&md),
             ) {
                 Ok(server) => server,
-                Err(e) => panic!("failed to build Node server, the error is : {}", e,),
+                Err(e) => panic!(
+                    "failed to build Node server, the error is : {}",
+                    util::format_anyhow_error(&e),
+                ),
             };
             let worker_server = match build_grpc_worker_server(md) {
                 Ok(server) => server,
-                Err(e) => panic!("failed to build Worker server, the error is : {}", e,),
+                Err(e) => panic!(
+                    "failed to build Worker server, the error is : {}",
+                    util::format_anyhow_error(&e),
+                ),
             };
 
             // Keep running the task in the background

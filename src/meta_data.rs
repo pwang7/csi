@@ -114,8 +114,6 @@ impl MetaData {
             run_as,
             etcd_client,
             node,
-            // volume_meta_data: RwLock::new(HashMap::new()),
-            // snapshot_meta_data: RwLock::new(HashMap::new()),
         };
         match md.run_as {
             RunAsRole::Both => {
@@ -290,7 +288,8 @@ impl MetaData {
             Err(e) => {
                 debug!(
                     "failed to find snapshot by source volume ID={} from etcd, the error is: {}",
-                    src_volume_id, e
+                    src_volume_id,
+                    util::format_anyhow_error(&e),
                 );
                 return None;
             }
@@ -308,7 +307,7 @@ impl MetaData {
         starting_token: &str,
         max_entries: i32,
         f: F,
-    ) -> Result<(Vec<T>, usize), (RpcStatusCode, String)>
+    ) -> Result<(Vec<T>, usize), (RpcStatusCode, anyhow::Error)>
     where
         F: Fn(&E) -> Option<T>,
     {
@@ -321,17 +320,17 @@ impl MetaData {
         } else {
             return Err((
                 RpcStatusCode::ABORTED,
-                format!("invalid starting position {}", starting_token),
+                anyhow!(format!("invalid starting position {}", starting_token)),
             ));
         };
         if starting_pos > 0 && starting_pos >= total_num {
             return Err((
                 RpcStatusCode::ABORTED,
-                format!(
+                anyhow!(format!(
                     "invalid starting token={}, larger than or equal to the list size={} of volumes",
                     starting_token,
                     total_num,
-                ),
+                )),
             ));
         }
         let (remaining, ofr) = total_num.overflowing_sub(starting_pos);
@@ -384,16 +383,11 @@ impl MetaData {
         &self,
         starting_token: &str,
         max_entries: i32,
-    ) -> Result<(Vec<ListVolumesResponse_Entry>, usize), (RpcStatusCode, String)> {
+    ) -> Result<(Vec<ListVolumesResponse_Entry>, usize), (RpcStatusCode, anyhow::Error)> {
         let vol_list: Vec<DatenLordVolume> = self
             .etcd_client
             .get_list(&format!("{}/", VOLUME_ID_PREFIX))
-            .map_err(|e| {
-                (
-                    RpcStatusCode::INTERNAL,
-                    format!("failed to list volumes, the error is: {}", e),
-                )
-            })?;
+            .map_err(|e| (RpcStatusCode::INTERNAL, e))?;
 
         Self::list_helper(vol_list, starting_token, max_entries, |vol| {
             let mut entry = ListVolumesResponse_Entry::new();
@@ -413,16 +407,11 @@ impl MetaData {
         &self,
         starting_token: &str,
         max_entries: i32,
-    ) -> Result<(Vec<ListSnapshotsResponse_Entry>, usize), (RpcStatusCode, String)> {
+    ) -> Result<(Vec<ListSnapshotsResponse_Entry>, usize), (RpcStatusCode, anyhow::Error)> {
         let snap_list: Vec<DatenLordSnapshot> = self
             .etcd_client
             .get_list(&format!("{}/", SNAPSHOT_ID_PREFIX))
-            .map_err(|e| {
-                (
-                    RpcStatusCode::INTERNAL,
-                    format!("failed to list snapshots, the error is: {}", e),
-                )
-            })?;
+            .map_err(|e| (RpcStatusCode::INTERNAL, e))?;
 
         Self::list_helper(snap_list, starting_token, max_entries, |snap| {
             let mut entry = ListSnapshotsResponse_Entry::new();
@@ -434,7 +423,10 @@ impl MetaData {
             entry.mut_snapshot().set_creation_time(
                 match util::generate_proto_timestamp(&snap.creation_time) {
                     Ok(ts) => ts,
-                    Err(e) => panic!("failed to generate proto timestamp, the error is: {}", e),
+                    Err(e) => panic!(
+                        "failed to generate proto timestamp, the error is: {}",
+                        util::format_anyhow_error(&e),
+                    ),
                 },
             );
             entry.mut_snapshot().set_ready_to_use(snap.ready_to_use);
@@ -480,7 +472,8 @@ impl MetaData {
             Err(e) => {
                 debug!(
                     "failed to find volume by name={} from etcd, the error is: {}",
-                    vol_name, e,
+                    vol_name,
+                    util::format_anyhow_error(&e),
                 );
                 return None;
             }
@@ -669,7 +662,9 @@ impl MetaData {
                     panic!(
                         "failed to un-mount volume ID={} bind path={}, \
                             the error is: {}",
-                        vol_id, pre_mount_path, e,
+                        vol_id,
+                        pre_mount_path,
+                        util::format_anyhow_error(&e),
                     );
                 }
             });
@@ -695,15 +690,18 @@ impl MetaData {
         dst_volume_size: i64,
         src_snapshot_id: &str,
         dst_volume_id: &str,
-    ) -> (RpcStatusCode, String) {
+    ) -> Result<(), (RpcStatusCode, anyhow::Error)> {
         let dst_path = self.get_volume_path(dst_volume_id);
 
         match self.get_snapshot_by_id(src_snapshot_id) {
             None => {
-                return (
+                return Err((
                     RpcStatusCode::NOT_FOUND,
-                    format!("failed to find source snapshot ID={}", src_snapshot_id,),
-                );
+                    anyhow!(format!(
+                        "failed to find source snapshot ID={}",
+                        src_snapshot_id,
+                    )),
+                ));
             }
             Some(src_snapshot) => {
                 assert_eq!(
@@ -715,26 +713,26 @@ impl MetaData {
                     self.get_node_id(),
                 );
                 if !src_snapshot.ready_to_use {
-                    return (
+                    return Err((
                         RpcStatusCode::INTERNAL,
-                        format!(
+                        anyhow!(format!(
                             "source snapshot ID={} and name={} is not yet ready to use",
                             src_snapshot.snap_id, src_snapshot.snap_name,
-                        ),
-                    );
+                        )),
+                    ));
                 }
                 if src_snapshot.size_bytes > dst_volume_size {
-                    return (
+                    return Err((
                         RpcStatusCode::INVALID_ARGUMENT,
-                        format!(
+                        anyhow!(format!(
                             "source snapshot ID={} and name={} has size={} \
                                 greater than requested volume size={}",
                             src_snapshot.snap_id,
                             src_snapshot.snap_name,
                             src_snapshot.size_bytes,
                             dst_volume_size,
-                        ),
-                    );
+                        )),
+                    ));
                 }
 
                 debug_assert!(
@@ -742,35 +740,26 @@ impl MetaData {
                     "the volume of monnt access type should have a directory path: {:?}",
                     dst_path,
                 );
-                let open_res = File::open(&src_snapshot.snap_path);
+                let open_res = File::open(&src_snapshot.snap_path)
+                    .context(format!("failed to open path={:?}", src_snapshot.snap_path));
                 let tar_gz = match open_res {
                     Ok(tg) => tg,
                     Err(e) => {
-                        return (
-                            RpcStatusCode::INTERNAL,
-                            format!(
-                                "failed to open source snapshot {:?}, the error is: {}",
-                                src_snapshot.snap_path, e,
-                            ),
-                        );
+                        return Err((RpcStatusCode::INTERNAL, e));
                     }
                 };
                 let tar_file = flate2::read::GzDecoder::new(tar_gz);
                 let mut archive = tar::Archive::new(tar_file);
-                let unpack_res = archive.unpack(&dst_path);
+                let unpack_res = archive
+                    .unpack(&dst_path)
+                    .context(format!("failed to decompress snapshot to {:?}", dst_path));
                 if let Err(e) = unpack_res {
-                    return (
-                        RpcStatusCode::INTERNAL,
-                        format!(
-                            "failed to decompress snapshot to {:?}, the error is: {}",
-                            dst_path, e,
-                        ),
-                    );
+                    return Err((RpcStatusCode::INTERNAL, e));
                 }
             }
         }
 
-        (RpcStatusCode::OK, "".to_owned())
+        Ok(())
     }
 
     /// Populate the given destPath with data from the `src_volume_id`
@@ -779,19 +768,19 @@ impl MetaData {
         dst_volume_size: i64,
         src_volume_id: &str,
         dst_volume_id: &str,
-    ) -> (RpcStatusCode, String) {
+    ) -> Result<(), (RpcStatusCode, anyhow::Error)> {
         let dst_path = self.get_volume_path(dst_volume_id);
 
         match self.get_volume_by_id(src_volume_id) {
             None => {
-                return (
+                return Err((
                     RpcStatusCode::NOT_FOUND,
-                    format!(
+                    anyhow!(format!(
                         "failed to find source volume ID={}, \
                             make sure source/destination in the same storage class",
                         src_volume_id,
-                    ),
-                );
+                    )),
+                ));
             }
             Some(src_volume) => {
                 assert_eq!(
@@ -803,24 +792,28 @@ impl MetaData {
                     self.get_node_id(),
                 );
                 if src_volume.get_size() > dst_volume_size {
-                    return (
+                    return Err((
                         RpcStatusCode::INVALID_ARGUMENT,
-                        format!(
+                        anyhow!(format!(
                             "source volume ID={} and name={} has size={} \
                                 greater than requested volume size={}",
                             src_volume.vol_id,
                             src_volume.vol_name,
                             src_volume.get_size(),
                             dst_volume_size,
-                        ),
-                    );
+                        )),
+                    ));
                 }
 
                 let copy_res = util::copy_directory_recursively(
                     &src_volume.vol_path,
                     &dst_path,
                     false, // follow symlink or not
-                );
+                )
+                .context(format!(
+                    "failed to pre-populate data from source mount volume {} and name={}",
+                    src_volume.vol_id, src_volume.vol_name,
+                ));
                 match copy_res {
                     Ok(copy_size) => {
                         info!(
@@ -828,23 +821,12 @@ impl MetaData {
                             copy_size, src_volume.vol_path, dst_path,
                         );
                     }
-                    Err(e) => {
-                        return (
-                            RpcStatusCode::INTERNAL,
-                            format!(
-                                "failed to pre-populate data from source mount volume {} and name={}, \
-                                    the error is: {}",
-                                src_volume.vol_id,
-                                src_volume.vol_name,
-                                e,
-                            ),
-                        );
-                    }
+                    Err(e) => return Err((RpcStatusCode::INTERNAL, e)),
                 }
             }
         }
 
-        (RpcStatusCode::OK, "".to_owned())
+        Ok(())
     }
 
     /// Delete one bind path of a volume from etcd,
@@ -934,6 +916,7 @@ impl MetaData {
 
     /// Write volume bind mount path to etcd,
     /// if volume has multiple bind mount path, then append to the value in etcd
+    // TODO: make it fault tolerant when etcd is down
     fn save_volume_bind_mount_path(
         &self,
         vol_id: &str,
@@ -966,7 +949,9 @@ impl MetaData {
                     panic!(
                         "failed to write the mount path={} of volume ID={} to etcd, \
                             the error is: {}",
-                        target_path, vol_id, e,
+                        target_path,
+                        vol_id,
+                        util::format_anyhow_error(&e),
                     );
                 }
             }
@@ -988,7 +973,9 @@ impl MetaData {
                     Err(e) => panic!(
                         "failed to add the mount path={} of volume ID={} to etcd, \
                             the error is: {}",
-                        target_path, vol_id, e,
+                        target_path,
+                        vol_id,
+                        util::format_anyhow_error(&e),
                     ),
                 }
             }
@@ -1007,23 +994,19 @@ impl MetaData {
         vol_id: &str,
         mount_options: &str,
         ephemeral: bool,
-    ) -> (RpcStatusCode, String) {
+    ) -> Result<(), (RpcStatusCode, anyhow::Error)> {
         let vol_path = self.get_volume_path(vol_id);
         // Bind mount from target_path to vol_path if run as root
         let target_path = Path::new(target_dir);
         if target_path.exists() {
             debug!("found target bind mount directory={:?}", target_path);
         } else {
-            let create_res = fs::create_dir_all(target_path);
+            let create_res = fs::create_dir_all(target_path).context(format!(
+                "failed to create target bind mount directory={:?}",
+                target_dir,
+            ));
             if let Err(e) = create_res {
-                return (
-                    RpcStatusCode::INTERNAL,
-                    format!(
-                        "failed to create target bind mount directory={:?}, \
-                            the error is: {}",
-                        target_dir, e,
-                    ),
-                );
+                return Err((RpcStatusCode::INTERNAL, e));
             }
         };
 
@@ -1042,7 +1025,8 @@ impl MetaData {
             }
             Err(e) => panic!(
                 "failed to get mount path of volume ID={} from etcd, the error is: {}",
-                vol_id, e,
+                vol_id,
+                util::format_anyhow_error(&e),
             ),
         };
         let mount_res = util::mount_volume_bind_path(
@@ -1052,7 +1036,11 @@ impl MetaData {
             mount_options,
             fs_type,
             read_only,
-        );
+        )
+        .context(format!(
+            "failed to bind mount from {:?} to {:?}",
+            vol_path, target_path,
+        ));
         if let Err(bind_err) = mount_res {
             if ephemeral {
                 match self.delete_volume_meta_data(vol_id) {
@@ -1063,27 +1051,21 @@ impl MetaData {
                     Err(e) => error!(
                         "failed to delete ephemeral volume ID={}, \
                             when bind mount failed, the error is: {}",
-                        vol_id, e,
+                        vol_id,
+                        util::format_anyhow_error(&e),
                     ),
                 }
             }
-            return (
-                RpcStatusCode::INTERNAL,
-                format!(
-                    "failed to bind mount from {:?} to {:?}, the bind error is: {}",
-                    vol_path, target_path, bind_err,
-                ),
-            );
+            return Err((RpcStatusCode::INTERNAL, bind_err));
         } else {
             info!(
                 "successfully bind mounted volume path={:?} to target path={:?}",
                 vol_path, target_dir,
             );
-
             self.save_volume_bind_mount_path(vol_id, target_dir, bind_mount_mode);
         }
 
-        (RpcStatusCode::OK, "".to_owned())
+        Ok(())
     }
 
     /// Build snapshot from source volume
@@ -1093,6 +1075,21 @@ impl MetaData {
         snap_id: &str,
         snap_name: &str,
     ) -> anyhow::Result<DatenLordSnapshot> {
+        /// Remove bad snapshot when compress error
+        fn remove_bad_snapshot(snap_path: &Path) {
+            let remove_res = fs::remove_file(snap_path).context(format!(
+                "failed to remove bad snapshot file {:?}",
+                snap_path,
+            ));
+            if let Err(remove_err) = remove_res {
+                error!(
+                    "failed to remove bad snapshot file {:?}, the error is: {}",
+                    snap_path,
+                    util::format_anyhow_error(&remove_err),
+                );
+            }
+        }
+
         match self.get_volume_by_id(src_vol_id) {
             Some(src_vol) => {
                 assert_eq!(
@@ -1107,62 +1104,36 @@ impl MetaData {
                 let vol_path = &src_vol.vol_path;
                 let snap_path = self.get_snapshot_path(snap_id);
 
-                let open_res = File::create(&snap_path);
-                let tar_gz = match open_res {
-                    Ok(tg) => tg,
-                    Err(e) => {
-                        return Err(anyhow!(format!(
-                            "failed to create snapshot file {:?}, the error is: {}",
-                            snap_path, e,
-                        ),));
-                    }
-                };
+                let tar_gz = File::create(&snap_path)
+                    .context(format!("failed to create snapshot file {:?}", snap_path))?;
                 let gz_file = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
                 let mut tar_file = tar::Builder::new(gz_file);
-                let tar_res = tar_file.append_dir_all("./", &vol_path);
-                if let Err(e) = tar_res {
-                    let remove_res = fs::remove_file(&snap_path);
-                    if let Err(e) = remove_res {
-                        error!(
-                            "failed to remove bad snapshot file {:?}, the error is: {}",
-                            snap_path, e,
-                        );
-                    }
-                    return Err(anyhow!(format!(
-                        "failed to generate snapshot for volume ID={} and name={}, the error is: {}",
-                        src_vol.vol_id, src_vol.vol_name, e,
-                    )));
+                let tar_res = tar_file.append_dir_all("./", &vol_path).context(format!(
+                    "failed to generate snapshot for volume ID={} and name={}",
+                    src_vol.vol_id, src_vol.vol_name,
+                ));
+                if let Err(append_err) = tar_res {
+                    remove_bad_snapshot(&snap_path);
+                    return Err(append_err);
                 }
-                let into_res = tar_file.into_inner();
+                let into_res = tar_file.into_inner().context(format!(
+                    "failed to generate snapshot for volume ID={} and name={}",
+                    src_vol.vol_id, src_vol.vol_name,
+                ));
                 match into_res {
                     Ok(gz_file) => {
-                        let gz_finish_res = gz_file.finish();
-                        if let Err(e) = gz_finish_res {
-                            let remove_res = fs::remove_file(&snap_path);
-                            if let Err(e) = remove_res {
-                                error!(
-                                    "failed to remove bad snapshot file {:?}, the error is: {}",
-                                    snap_path, e
-                                );
-                            }
-                            return Err(anyhow!(format!(
-                                    "failed to generate snapshot for volume ID={} and name={}, the error is: {}",
-                                    src_vol.vol_id, src_vol.vol_name, e,
-                                )));
+                        let gz_finish_res = gz_file.finish().context(format!(
+                            "failed to generate snapshot for volume ID={} and name={}",
+                            src_vol.vol_id, src_vol.vol_name,
+                        ));
+                        if let Err(finish_err) = gz_finish_res {
+                            remove_bad_snapshot(&snap_path);
+                            return Err(finish_err);
                         }
                     }
-                    Err(e) => {
-                        let remove_res = fs::remove_file(&snap_path);
-                        if let Err(e) = remove_res {
-                            error!(
-                                "failed to remove bad snapshot file {:?}, the error is: {}",
-                                snap_path, e
-                            );
-                        }
-                        return Err(anyhow!(format!(
-                                "failed to generate snapshot for volume ID={} and name={}, the error is: {}",
-                                src_vol.vol_id, src_vol.vol_name, e,
-                            )));
+                    Err(into_err) => {
+                        remove_bad_snapshot(&snap_path);
+                        return Err(into_err);
                     }
                 }
 
@@ -1201,7 +1172,7 @@ impl MetaData {
             Err(anyhow!(
                 "the new size={} is smaller than original size={}",
                 new_size_bytes,
-                old_size_bytes
+                old_size_bytes,
             ))
         }
     }

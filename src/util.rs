@@ -72,6 +72,18 @@ pub enum BindMountMode {
     Remount,
 }
 
+/// Format `anyhow::Error`
+// TODO: refactor this
+pub fn format_anyhow_error(error: &anyhow::Error) -> String {
+    let err_msg_vec = error
+        .chain()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>();
+    let mut err_msg = err_msg_vec.as_slice().join(", caused by: ");
+    err_msg.push_str(&format!(", root cause: {}", error.root_cause()));
+    err_msg
+}
+
 /// Convert `SystemTime` to proto timestamp
 pub fn generate_proto_timestamp(
     st: &std::time::SystemTime,
@@ -85,21 +97,6 @@ pub fn generate_proto_timestamp(
 
     Ok(ts)
 }
-
-// /// Convert proto timestamp to `SystemTime`
-// pub fn generate_system_time(
-//     proto_ts: &protobuf::well_known_types::Timestamp,
-// ) -> anyhow::Result<std::time::SystemTime> {
-//     let drtn = std::time::Duration::new(proto_ts.seconds.cast(), proto_ts.nanos.cast());
-//     let add_res = std::time::UNIX_EPOCH.checked_add(drtn);
-//     if let Some(ts) = add_res {
-//         Ok(ts)
-//     } else {
-//         Err(anyhow!(
-//             "failed to convert proto timestamp to SystemTime"
-//         ))
-//     }
-// }
 
 /// Copy a directory recursively
 pub fn copy_directory_recursively(
@@ -160,23 +157,15 @@ pub fn build_create_snapshot_response(
     ts: &std::time::SystemTime,
     size_bytes: i64,
 ) -> anyhow::Result<CreateSnapshotResponse> {
-    let ts_res = generate_proto_timestamp(ts);
-    let proto_ts_now = match ts_res {
-        Ok(ts) => ts,
-        Err(e) => {
-            return Err(anyhow!(format!(
-                "failed to generate proto timestamp \
-                            when creating snapshot from volume ID={}, \
-                            the error is: {}",
-                req.get_source_volume_id(),
-                e,
-            )));
-        }
-    };
+    let proto_ts = generate_proto_timestamp(ts).context(format!(
+        "failed to generate proto timestamp \
+            when creating snapshot from volume ID={}",
+        req.get_source_volume_id(),
+    ))?;
     let mut s = Snapshot::new();
     s.set_snapshot_id(snap_id.to_owned());
     s.set_source_volume_id(req.get_source_volume_id().to_owned());
-    s.set_creation_time(proto_ts_now);
+    s.set_creation_time(proto_ts);
     s.set_size_bytes(size_bytes);
     s.set_ready_to_use(true);
     let mut r = CreateSnapshotResponse::new();
@@ -194,14 +183,19 @@ pub fn success<R>(ctx: &RpcContext, sink: UnarySink<R>, r: R) {
 }
 
 /// Send failure `gRPC` response
-pub fn fail<R>(ctx: &RpcContext, sink: UnarySink<R>, rsc: RpcStatusCode, msg: String) {
+pub fn fail<R>(
+    ctx: &RpcContext,
+    sink: UnarySink<R>,
+    rsc: RpcStatusCode,
+    anyhow_err: &anyhow::Error,
+) {
     debug_assert_ne!(
         rsc,
         RpcStatusCode::OK,
         "the input RpcStatusCode should not be OK"
     );
-    let details = if msg.is_empty() { None } else { Some(msg) };
-    let rs = RpcStatus::new(rsc, details);
+    let details = format_anyhow_error(anyhow_err);
+    let rs = RpcStatus::new(rsc, Some(details));
     let f = sink
         .fail(rs)
         .map_err(move |e| error!("failed to send response, the error is: {:?}", e))
@@ -211,13 +205,17 @@ pub fn fail<R>(ctx: &RpcContext, sink: UnarySink<R>, rsc: RpcStatusCode, msg: St
 
 /// Decode from bytes
 pub fn decode_from_bytes<T: DeserializeOwned>(bytes: &[u8]) -> anyhow::Result<T> {
-    let decoded_value = bincode::deserialize(bytes).map_err(|e| {
-        anyhow!(
-            "failed to decode bytes to {}, the error is: {}",
-            std::any::type_name::<T>(),
-            e,
-        )
-    })?;
+    // let decoded_value = bincode::deserialize(bytes).map_err(|e| {
+    //     anyhow!(
+    //         "failed to decode bytes to {}, the error is: {}",
+    //         std::any::type_name::<T>(),
+    //         e,
+    //     )
+    // })?;
+    let decoded_value = bincode::deserialize(bytes).context(format!(
+        "failed to decode bytes to {}",
+        std::any::type_name::<T>(),
+    ))?;
     Ok(decoded_value)
 }
 
