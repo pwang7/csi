@@ -47,15 +47,13 @@ impl EtcdClient {
         Ok(result_vec)
     }
 
-    /// Get key-value from etcd
+    /// Get one key-value pair from etcd
     async fn get_one_kv_async<T: DeserializeOwned>(&self, key: &str) -> anyhow::Result<Option<T>> {
         let req = etcd_rs::RangeRequest::new(etcd_rs::KeyRange::key(key));
-        let mut resp = self
-            .etcd_rs_client
-            .kv()
-            .range(req)
-            .await
-            .context("failed to get RangeResponse from etcd")?;
+        let mut resp = self.etcd_rs_client.kv().range(req).await.context(format!(
+            "failed to get RangeResponse of one key-value pair from etcd, the key={:?}",
+            key
+        ))?;
 
         let kvs = resp.take_kvs();
         match kvs.get(0) {

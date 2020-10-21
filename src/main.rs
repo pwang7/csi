@@ -681,7 +681,8 @@ mod test {
             "the expanded volume size not match"
         );
 
-        let selected_node = meta_data.select_node(None)?;
+        let request = CreateVolumeRequest::new();
+        let selected_node = meta_data.select_node(&request)?;
         assert_eq!(
             selected_node.node_id, DEFAULT_NODE_NAME,
             "selected node ID not match"

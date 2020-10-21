@@ -8,15 +8,16 @@ env:
   CI_RUST_TOOLCHAIN: 1.47.0
   CONTROLLER_APP_LABEL: csi-controller-datenlord
   CONTROLLER_CONTAINER_NAME: datenlord-controller-plugin
-  DATENLORD_DOCKER_IMAGE: datenlord/csiplugin:e2e_test
+  DATENLORD_CSI_IMAGE: datenlord/csiplugin:e2e_test
   DATENLORD_NAMESPACE: csi-datenlord
   FUSE_CONTAINER_NAME: datenlord-fuse
   FUSE_MOUNT_PATH: /var/opt/datenlord-data
   K8S_CONFIG: k8s.e2e.config
+  K8S_VERSION: v1.19.0
+  KIND_VERSION: v0.9.0
   NODE_APP_LABEL: csi-nodeplugin-datenlord
   NODE_CONTAINER_NAME: datenlord-node-plugin
   MINIKUBE_VERSION: v1.13.0
-  K8S_VERSION: v1.19.0
 
 jobs:
   outdated:
@@ -195,7 +196,7 @@ jobs:
           export BUILD_DIR=/tmp/datenlord_container_build
           mkdir -p $BUILD_DIR
           cp target/debug/csi $BUILD_DIR
-          docker build $BUILD_DIR --file ./Dockerfile --tag $DATENLORD_DOCKER_IMAGE
+          docker build $BUILD_DIR --file ./Dockerfile --tag $DATENLORD_CSI_IMAGE
       - name: Deploy DatenLord CSI plugin to K8s
         run: |
           kubectl cluster-info
@@ -398,13 +399,13 @@ jobs:
           version: latest
       - name: Install Kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.9.0/kind-linux-amd64
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/$KIND_VERSION/kind-linux-amd64
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin
       - name: Create Kind Cluster
         run: |
           kind create cluster --config kind-config.yaml
-      - name: Setup
+      - name: Setup SSH
         run: |
           cat >>/tmp/setup.sh <<'END'
           NODES_IP="$(kubectl get nodes -A -o wide | awk 'FNR > 2 {print $6}')"
@@ -412,8 +413,7 @@ jobs:
           for node in ${NODES}; do
             USER="$(whoami)"
             docker exec ${node} apt-get update
-            docker exec ${node} apt-get install -y ssh
-            docker exec ${node} apt-get install -y sudo
+            docker exec ${node} apt-get install -y ssh sudo
             docker exec ${node} systemctl start sshd
             docker exec ${node} useradd -m ${USER}
             docker exec ${node} usermod -aG sudo ${USER}
@@ -452,8 +452,8 @@ jobs:
           export BUILD_DIR=/tmp/datenlord_container_build
           mkdir -p $BUILD_DIR
           cp target/debug/csi $BUILD_DIR
-          docker build $BUILD_DIR --file ./Dockerfile --tag $DATENLORD_DOCKER_IMAGE
-          kind load docker-image $DATENLORD_DOCKER_IMAGE
+          docker build $BUILD_DIR --file ./Dockerfile --tag $DATENLORD_CSI_IMAGE
+          kind load docker-image $DATENLORD_CSI_IMAGE
       - name: Deploy DatenLord CSI plugin to K8s
         run: |
           kubectl cluster-info
@@ -483,7 +483,8 @@ jobs:
           tar zxvf kubernetes-test-linux-amd64.tar.gz
           export K8S_CONFIG=k8s.e2e.config
           kubectl config view --raw > $K8S_CONFIG
-          kubernetes/test/bin/e2e.test -v=6 -ginkgo.v -ginkgo.focus='External.Storage' -ginkgo.skip='.*csi.datenlord.io.*Dynamic PV.*filesystem.*should access to two volumes with the same volume mode and retain data across pod recreation on .* node|.*csi.datenlord.io.*Dynamic PV.*default fs.*should allow exec of files on the volume' -kubectl-path=`which kubectl` -kubeconfig=$K8S_CONFIG -storage.testdriver=datenlord-e2e-test.yaml
+          kubernetes/test/bin/e2e.test -v=5 -ginkgo.debug -ginkgo.failFast -ginkgo.failOnPending -ginkgo.v -ginkgo.focus='External.Storage' -ginkgo.skip='.*csi.datenlord.io.*Dynamic PV.*filesystem.*should access to two volumes with the same volume mode and retain data across pod recreation on .* node|.*csi.datenlord.io.*Dynamic PV.*default fs.*should allow exec of files on the volume' -kubectl-path=`which kubectl` -kubeconfig=$K8S_CONFIG -storage.testdriver=datenlord-e2e-test.yaml
+          #kubernetes/test/bin/ginkgo -p -v -failFast -failOnPending -debug -focus='External.Storage' -skip='.*csi.datenlord.io.*Dynamic PV.*filesystem.*should access to two volumes with the same volume mode and retain data across pod recreation on .* node|.*csi.datenlord.io.*Dynamic PV.*default fs.*should allow exec of files on the volume' kubernetes/test/bin/e2e.test -- -v=5 -kubectl-path=`which kubectl` -kubeconfig=$K8S_CONFIG -storage.testdriver=$(pwd)/datenlord-e2e-test.yaml
       - name: Print DatenLord logs
         if: ${{ failure() }}
         run: |

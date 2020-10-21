@@ -165,82 +165,77 @@ impl MetaData {
         let mut rng = rand::thread_rng();
 
         let idx = rng.gen_range(0, node_list.len());
-        if let Some(node) = node_list.get(idx) {
-            Ok(node.clone())
-        } else {
-            panic!(
-                "failed to get the {}-th node from returned node list, list={:?}",
-                idx, node_list,
-            );
-        }
+        Ok(node_list
+            .get(idx)
+            .unwrap_or_else(|| {
+                panic!(
+                    "failed to get the {}-th node from returned node list, list={:?}",
+                    idx, node_list,
+                )
+            })
+            .clone())
     }
 
-    /// Get node id from request
-    fn get_node_id_from_request(&self, req: &CreateVolumeRequest) -> Option<String> {
-        if req.has_volume_content_source() {
-            let volume_src = req.get_volume_content_source();
-            if volume_src.has_snapshot() {
-                let snapshot_id = &volume_src.get_snapshot().snapshot_id;
-                let snapshot = self
-                    .get_snapshot_by_id(snapshot_id)
-                    .unwrap_or_else(|| panic!("failed to get snapshot ID={}", snapshot_id));
-                Some(snapshot.node_id)
-            } else if volume_src.has_volume() {
-                let volume_id = &volume_src.get_volume().volume_id;
-                let volume = self
-                    .get_volume_by_id(volume_id)
-                    .unwrap_or_else(|| panic!("failed to get volume ID={}", volume_id));
-                Some(volume.node_id)
-            } else {
-                None
-            }
+    /// Get volume source node ID from request
+    fn get_volume_source_node_id(
+        &self,
+        req: &CreateVolumeRequest,
+    ) -> anyhow::Result<Option<String>> {
+        if !req.has_volume_content_source() {
+            return Ok(None);
+        }
+        let volume_src = req.get_volume_content_source();
+        if volume_src.has_snapshot() {
+            let snapshot_id = &volume_src.get_snapshot().snapshot_id;
+            self.get_snapshot_by_id(snapshot_id)
+                .map(|snapshot| Some(snapshot.node_id))
+                .ok_or(anyhow!(format!(
+                    "failed to get snapshot ID={}",
+                    snapshot_id
+                )))
+        } else if volume_src.has_volume() {
+            let volume_id = &volume_src.get_volume().volume_id;
+            self.get_volume_by_id(volume_id)
+                .map(|volume| Some(volume.node_id))
+                .ok_or(anyhow!(format!("failed to get volume ID={}", volume_id)))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    /// Check node ID in request topology
-    fn check_node_id_in_request_topology(node_id: &str, req: &CreateVolumeRequest) -> bool {
-        if req.has_accessibility_requirements() {
-            let required_topology = req.get_accessibility_requirements().get_requisite();
-            let preferred_topology = req.get_accessibility_requirements().get_preferred();
-
-            if !required_topology
-                .iter()
-                .any(|t| t.get_segments().iter().any(|(_k, v)| v == node_id))
-                && !preferred_topology
-                    .iter()
-                    .any(|t| t.get_segments().iter().any(|(_k, v)| v == node_id))
-            {
-                return false;
-            }
-        }
-        true
     }
 
     /// Select a node to create volume or snapshot
-    pub fn select_node(&self, req: Option<&CreateVolumeRequest>) -> anyhow::Result<DatenLordNode> {
-        if let Some(request) = req {
-            let node_id_option = self.get_node_id_from_request(request);
-            if let Some(node_id) = node_id_option {
-                debug!("select node ID={} from request", node_id);
-                if Self::check_node_id_in_request_topology(&node_id, request) {
-                    if let Some(node) = self.get_node_by_id(&node_id) {
-                        Ok(node)
-                    } else {
-                        panic!("failed to get node ID={}", node_id);
-                    }
-                } else {
-                    panic!("select node ID={} is not in request required topology and preferred topology", node_id);
-                }
-            } else {
+    pub fn select_node(&self, req: &CreateVolumeRequest) -> anyhow::Result<DatenLordNode> {
+        self.get_volume_source_node_id(req)?.map_or_else(
+            || {
                 debug!("request doesn't have node id, select random node");
                 self.select_random_node()
-            }
-        } else {
-            debug!("empty request, select random node");
-            self.select_random_node()
-        }
+            },
+            |node_id| {
+                debug!("select node ID={} from request", node_id);
+
+                if !req.has_accessibility_requirements()
+                    || (req
+                        .get_accessibility_requirements()
+                        .get_requisite()
+                        .iter()
+                        .any(|t| t.get_segments().iter().any(|(_k, v)| v == &node_id))
+                        || req
+                            .get_accessibility_requirements()
+                            .get_preferred()
+                            .iter()
+                            .any(|t| t.get_segments().iter().any(|(_k, v)| v == &node_id)))
+                {
+                    Ok(self
+                        .get_node_by_id(&node_id)
+                        .unwrap_or_else(|| panic!("failed to get node ID={}", node_id)))
+                } else {
+                    panic!(
+                    "select node ID={} is not in request required topology and preferred topology",
+                    node_id
+                );
+                }
+            },
+        )
     }
 
     /// Get volume absolute path by ID

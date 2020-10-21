@@ -245,14 +245,14 @@ impl ControllerImpl {
         &self,
         req: &CreateVolumeRequest,
     ) -> Result<CreateVolumeResponse, (RpcStatusCode, anyhow::Error)> {
-        let worker_node = match self.meta_data.select_node(Some(req)) {
+        let worker_node = match self.meta_data.select_node(req) {
             Ok(n) => n,
             Err(e) => {
                 error!(
                     "failed to select a node, the error is: {}",
                     util::format_anyhow_error(&e),
                 );
-                return Err((RpcStatusCode::INTERNAL, e));
+                return Err((RpcStatusCode::NOT_FOUND, e));
             }
         };
         let client = MetaData::build_worker_client(&worker_node);
