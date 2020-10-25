@@ -176,36 +176,30 @@ impl MetaData {
             .clone())
     }
 
-    /// Get volume source node ID from request
-    fn get_volume_source_node_id(
-        &self,
-        req: &CreateVolumeRequest,
-    ) -> anyhow::Result<Option<String>> {
-        if !req.has_volume_content_source() {
-            return Ok(None);
-        }
-        let volume_src = req.get_volume_content_source();
-        if volume_src.has_snapshot() {
-            let snapshot_id = &volume_src.get_snapshot().snapshot_id;
-            self.get_snapshot_by_id(snapshot_id)
-                .map(|snapshot| Some(snapshot.node_id))
-                .ok_or(anyhow!(format!(
-                    "failed to get snapshot ID={}",
-                    snapshot_id
-                )))
-        } else if volume_src.has_volume() {
-            let volume_id = &volume_src.get_volume().volume_id;
-            self.get_volume_by_id(volume_id)
-                .map(|volume| Some(volume.node_id))
-                .ok_or(anyhow!(format!("failed to get volume ID={}", volume_id)))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Select a node to create volume or snapshot
     pub fn select_node(&self, req: &CreateVolumeRequest) -> anyhow::Result<DatenLordNode> {
-        self.get_volume_source_node_id(req)?.map_or_else(
+        let node_id = if req.has_volume_content_source() {
+            let volume_src = req.get_volume_content_source();
+            if volume_src.has_snapshot() {
+                let snapshot_id = &volume_src.get_snapshot().snapshot_id;
+                self.get_snapshot_by_id(snapshot_id)
+                    .map(|snapshot| Some(snapshot.node_id))
+                    .ok_or(anyhow!(format!(
+                        "failed to get snapshot ID={}",
+                        snapshot_id
+                    )))?
+            } else if volume_src.has_volume() {
+                let volume_id = &volume_src.get_volume().volume_id;
+                self.get_volume_by_id(volume_id)
+                    .map(|volume| Some(volume.node_id))
+                    .ok_or(anyhow!(format!("failed to get volume ID={}", volume_id)))?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        node_id.map_or_else(
             || {
                 debug!("request doesn't have node id, select random node");
                 self.select_random_node()
@@ -213,26 +207,29 @@ impl MetaData {
             |node_id| {
                 debug!("select node ID={} from request", node_id);
 
-                if !req.has_accessibility_requirements()
-                    || (req
+                if req.has_accessibility_requirements() {
+                    let match_requisite = req
                         .get_accessibility_requirements()
                         .get_requisite()
                         .iter()
-                        .any(|t| t.get_segments().iter().any(|(_k, v)| v == &node_id))
-                        || req
+                        .any(|t| t.get_segments().iter().any(|(_k, v)| v == &node_id));
+                    let match_preferred = req
                             .get_accessibility_requirements()
                             .get_preferred()
                             .iter()
-                            .any(|t| t.get_segments().iter().any(|(_k, v)| v == &node_id)))
-                {
-                    Ok(self
-                        .get_node_by_id(&node_id)
-                        .unwrap_or_else(|| panic!("failed to get node ID={}", node_id)))
+                            .any(|t| t.get_segments().iter().any(|(_k, v)| v == &node_id));
+                    if match_requisite || match_preferred {
+                        self.get_node_by_id(&node_id).ok_or_else(|| panic!("failed to get node ID={}", node_id))
+                    } else {
+                        panic!(
+                            "select node ID={} is not in request required topology and preferred topology",
+                            node_id,
+                        );
+                    }
                 } else {
-                    panic!(
-                    "select node ID={} is not in request required topology and preferred topology",
-                    node_id
-                );
+                    self
+                        .get_node_by_id(&node_id)
+                        .ok_or_else(|| panic!("failed to get node ID={}", node_id))
                 }
             },
         )
