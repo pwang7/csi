@@ -228,8 +228,8 @@ jobs:
           #wget --quiet https://dl.k8s.io/v1.19.0/kubernetes-test-linux-amd64.tar.gz
           tar zxvf kubernetes-test-linux-amd64.tar.gz
           kubectl config view --raw > $K8S_CONFIG
-          kubernetes/test/bin/e2e.test -v=5 -ginkgo.debug -ginkgo.failFast -ginkgo.failOnPending -ginkgo.v -ginkgo.focus='External.Storage' -kubectl-path=`which kubectl` -kubeconfig=$K8S_CONFIG -storage.testdriver=datenlord-e2e-test.yaml
-          #kubernetes/test/bin/ginkgo -p -v -failFast -failOnPending -debug -focus='External.Storage' kubernetes/test/bin/e2e.test -- -v=5 -kubectl-path=`which kubectl` -kubeconfig=$K8S_CONFIG -storage.testdriver=datenlord-e2e-test.yaml
+          #kubernetes/test/bin/e2e.test -v=5 -ginkgo.debug -ginkgo.failFast -ginkgo.failOnPending -ginkgo.v -ginkgo.focus='External.Storage' -kubectl-path=`which kubectl` -kubeconfig=$K8S_CONFIG -storage.testdriver=datenlord-e2e-test.yaml -test.parallel=3
+          kubernetes/test/bin/ginkgo -p -v -failFast -failOnPending -debug -focus='External.Storage' kubernetes/test/bin/e2e.test -- -v=5 -kubectl-path=`which kubectl` -kubeconfig=$PWD/$K8S_CONFIG -storage.testdriver=$PWD/datenlord-e2e-test.yaml -test.parallel=3
       - name: Print DatenLord logs
         if: ${{ failure() }}
         run: |
@@ -481,9 +481,9 @@ jobs:
         run: |
           wget --quiet https://dl.k8s.io/$K8S_VERSION/kubernetes-test-linux-amd64.tar.gz
           tar zxvf kubernetes-test-linux-amd64.tar.gz
-          export K8S_CONFIG=k8s.e2e.config
           kubectl config view --raw > $K8S_CONFIG
-          kubernetes/test/bin/e2e.test -v=5 -ginkgo.debug -ginkgo.failFast -ginkgo.failOnPending -ginkgo.v -ginkgo.focus='External.Storage' -ginkgo.skip='.*Dynamic PV.*filesystem.*should access to two volumes with the same volume mode and retain data across pod recreation on .* node|.*Dynamic PV.*default fs.*should allow exec of files on the volume' -kubectl-path=`which kubectl` -kubeconfig=$K8S_CONFIG -storage.testdriver=datenlord-e2e-test.yaml
+          #kubernetes/test/bin/e2e.test -v=5 -ginkgo.debug -ginkgo.failFast -ginkgo.failOnPending -ginkgo.v -ginkgo.focus='External.Storage' -ginkgo.skip='.*Dynamic PV.*filesystem.*should access to two volumes with the same volume mode and retain data across pod recreation on .* node|.*Dynamic PV.*default fs.*should allow exec of files on the volume' -kubectl-path=`which kubectl` -kubeconfig=$K8S_CONFIG -storage.testdriver=datenlord-e2e-test.yaml -test.parallel=3
+          kubernetes/test/bin/ginkgo -p -v -failFast -failOnPending -debug -focus='External.Storage' -skip='.*Dynamic PV.*filesystem.*should access to two volumes with the same volume mode and retain data across pod recreation on .* node|.*Dynamic PV.*default fs.*should allow exec of files on the volume' kubernetes/test/bin/e2e.test -- -v=5 -kubectl-path=`which kubectl` -kubeconfig=$PWD/$K8S_CONFIG -storage.testdriver=$PWD/datenlord-e2e-test.yaml -test.parallel=3
       - name: Print DatenLord logs
         if: ${{ failure() }}
         run: |
